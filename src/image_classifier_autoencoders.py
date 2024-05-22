@@ -40,7 +40,7 @@ logging.captureWarnings(True)
 PATH = './autoencoder.pth'
 
 # Device configuration
-device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
 
 # Improved Autoencoder model definition
 class Autoencoder(nn.Module):
@@ -195,8 +195,19 @@ def extract_features(dataloader, model):
 def evaluate_clustering(features, labels, n_clusters=10):
     kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(features)
     predicted_labels = kmeans.labels_
-    accuracy = accuracy_score(labels, predicted_labels)
-    ari = adjusted_rand_score(labels, predicted_labels)
+    # Map the predicted labels to the most frequent true labels in each cluster
+    label_mapping = {}
+    for cluster in range(n_clusters):
+        cluster_indices = np.where(predicted_labels == cluster)[0]
+        true_labels = labels[cluster_indices]
+        most_common_label = np.bincount(true_labels).argmax()
+        label_mapping[cluster] = most_common_label
+    
+    # Replace predicted labels with mapped labels
+    mapped_predicted_labels = np.vectorize(label_mapping.get)(predicted_labels)
+    
+    accuracy = accuracy_score(labels, mapped_predicted_labels)
+    ari = adjusted_rand_score(labels, mapped_predicted_labels)
     print(f'Clustering Accuracy: {accuracy}')
     print(f'Adjusted Rand Index: {ari}')
 
