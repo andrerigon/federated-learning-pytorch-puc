@@ -40,9 +40,9 @@ logging.captureWarnings(True)
 PATH = './autoencoder.pth'
 
 # Device configuration
-device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Improved Autoencoder model definition
+# Simplified Autoencoder model definition
 class Autoencoder(nn.Module):
     def __init__(self):
         super(Autoencoder, self).__init__()
@@ -60,6 +60,8 @@ class Autoencoder(nn.Module):
             nn.BatchNorm2d(256),
             nn.ReLU(True),
             nn.Conv2d(256, 512, 3, stride=2, padding=1),  # b, 512, 1, 1
+            nn.BatchNorm2d(512),
+            nn.ReLU(True)
         )
         self.decoder = nn.Sequential(
             nn.ConvTranspose2d(512, 256, 3, stride=2, padding=1, output_padding=1),  # b, 256, 2, 2
@@ -93,7 +95,9 @@ def imshow(img):
 # Function to download and transform CIFAR-10 dataset
 def download_dataset():
     transform = transforms.Compose(
-        [transforms.ToTensor(),
+        [transforms.RandomHorizontalFlip(),
+         transforms.RandomCrop(32, padding=4),
+         transforms.ToTensor(),
          transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
     trainset = torchvision.datasets.CIFAR10(root='./data', train=True,
@@ -112,7 +116,7 @@ def split_dataset(dataset, num_clients):
 # Function to train a local model on a client's data
 def train_local_model(client_id, client_loader, net, epochs, global_progress):
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(net.parameters(), lr=0.001)
+    optimizer = optim.AdamW(net.parameters(), lr=0.0001, weight_decay=1e-5)  # Reduced learning rate
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
     for epoch in range(epochs):
@@ -238,7 +242,7 @@ def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Federated Learning with Autoencoders on CIFAR-10')
     parser.add_argument('--num_clients', type=int, default=10, help='Number of clients')
-    parser.add_argument('--epochs', type=int, default=20, help='Number of epochs')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')  # Increased epochs
     parser.add_argument('--max_workers', type=int, default=10, help='Maximum number of workers')
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size for DataLoader')
 
