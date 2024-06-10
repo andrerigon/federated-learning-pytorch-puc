@@ -10,6 +10,10 @@ from io import BytesIO
 from io import BytesIO
 import logging
 import gzip
+import numpy as np
+import torch.nn as nn
+from sklearn.cluster import KMeans
+from sklearn.metrics import accuracy_score, adjusted_rand_score
 
 from gradysim.protocol.interface import IProtocol
 from gradysim.protocol.messages.communication import SendMessageCommand, BroadcastMessageCommand
@@ -76,10 +80,17 @@ class SimpleSensorProtocol(IProtocol):
         while not self.finished:
             self.train()    
 
+    
+
     def train(self, epochs = 1):
+        # Specify the quantization engine
+        torch.backends.quantized.engine = 'qnnpack'  # Use 'qnnpack' for ARM architectures
         try:
             local_model = Autoencoder().to(device)
             local_model.load_state_dict(self.global_model.state_dict())
+            local_model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
+            torch.quantization.prepare_qat(local_model, inplace=True)
+
             criterion = nn.MSELoss()
             optimizer = optim.AdamW(self.global_model.parameters(), lr=0.0001, weight_decay=1e-5)  # Reduced learning rate
             scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
@@ -100,6 +111,8 @@ class SimpleSensorProtocol(IProtocol):
                     running_loss += loss.item()
                     progress_bar.set_postfix(loss=running_loss / (i + 1))
                 scheduler.step()
+            local_model.eval()
+            local_model = torch.quantization.convert(local_model)
             self.current_state = local_model.state_dict()   
             self.model_updated = True 
 
@@ -195,6 +208,20 @@ mission_list = [
 ]
 
 
+def decompress_and_deserialize_state_dict(serialized_state_dict):
+    # Decode the base64 to get compressed byte stream
+    compressed_data = base64.b64decode(serialized_state_dict.encode('utf-8'))
+    
+    # Decompress the byte stream
+    compressed_buffer = BytesIO(compressed_data)
+    with gzip.GzipFile(fileobj=compressed_buffer, mode='rb') as f:
+        buffer = BytesIO(f.read())
+    
+    buffer.seek(0)
+    
+    # Deserialize the state_dict
+    return torch.load(buffer)
+
 class SimpleUAVProtocol(IProtocol):
     _log: logging.Logger
 
@@ -212,6 +239,8 @@ class SimpleUAVProtocol(IProtocol):
 
         self._mission.start_mission(mission_list.pop())
 
+        self.model = Autoencoder().to(device)
+
         self._send_heartbeat()
 
     def _send_heartbeat(self) -> None:
@@ -227,11 +256,26 @@ class SimpleUAVProtocol(IProtocol):
 
         self.provider.schedule_timer("", self.provider.current_time() + 1)
 
+    def update_global_model_with_client(self, client_dict, alpha=0.1):
+        global_dict = self.model.state_dict()
+
+        for k in global_dict.keys():
+            global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
+        self.model.load_state_dict(global_dict)
+        self.model.eval()
+        self.model = torch.quantization.convert(self.model)
+
     def handle_timer(self, timer: str) -> None:
         self._send_heartbeat()
 
     def handle_packet(self, message: str) -> None:
         self._log.info(f'got message with size: {len(message)}')
+        message: ModelUpdate = json.loads(message)
+
+        decompressed_state_dict = decompress_and_deserialize_state_dict(message['state_dict_json'])
+        self.update_global_model_with_client(decompressed_state_dict)
+        self._log.info(f'got model: {self.model}')
+        
         # simple_message: SimpleMessage = json.loads(message)
         # self._log.info(report_message(simple_message))
 
@@ -247,8 +291,62 @@ class SimpleUAVProtocol(IProtocol):
         pass
 
     def finish(self) -> None:
+        _, testset = download_dataset()
+        testloader = DataLoader(testset, batch_size=4, shuffle=False, num_workers=2)
+        self.check(testloader)
         self._log.info(f"Final packet count: {self.packet_count}")
 
+    def check(self, testloader):
+        
+        criterion = nn.MSELoss()
+        total_loss = 0
+        with tqdm(total=len(testloader), desc="Testing Progress") as progress_bar:
+            with torch.no_grad():
+                for data in testloader:
+                    images = data[0].to(device)
+                    outputs = self.model(images)
+                    loss = criterion(outputs, images)
+                    total_loss += loss.item()
+                    progress_bar.update(1)
+
+        print(f'Mean Squared Error of the network on the test images: {total_loss / len(testloader)}')
+
+        # Extract features and evaluate clustering
+        features, labels = extract_features(testloader, self.model)
+        evaluate_clustering(features, labels)
+
+# Function to extract features using the encoder part of the autoencoder
+def extract_features(dataloader, model):
+    model.eval()
+    features = []
+    labels = []
+    with torch.no_grad():
+        for data in dataloader:
+            images, targets = data[0].to(device), data[1]
+            encoded = model.encoder(images)
+            features.append(encoded.view(encoded.size(0), -1).cpu().numpy())
+            labels.append(targets.cpu().numpy())
+    return np.concatenate(features), np.concatenate(labels)
+
+# Function to apply K-means and evaluate clustering performance
+def evaluate_clustering(features, labels, n_clusters=10):
+    kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(features)
+    predicted_labels = kmeans.labels_
+    # Map the predicted labels to the most frequent true labels in each cluster
+    label_mapping = {}
+    for cluster in range(n_clusters):
+        cluster_indices = np.where(predicted_labels == cluster)[0]
+        true_labels = labels[cluster_indices]
+        most_common_label = np.bincount(true_labels).argmax()
+        label_mapping[cluster] = most_common_label
+    
+    # Replace predicted labels with mapped labels
+    mapped_predicted_labels = np.vectorize(label_mapping.get)(predicted_labels)
+    
+    accuracy = accuracy_score(labels, mapped_predicted_labels)
+    ari = adjusted_rand_score(labels, mapped_predicted_labels)
+    print(f'Clustering Accuracy: {accuracy}')
+    print(f'Adjusted Rand Index: {ari}')        
 
 class SimpleGroundStationProtocol(IProtocol):
     _log: logging.Logger

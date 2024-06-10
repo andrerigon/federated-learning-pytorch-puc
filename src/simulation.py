@@ -10,7 +10,7 @@ from simple_protocol import SimpleSensorProtocol, SimpleGroundStationProtocol, S
 def main():
     # Configuring simulation
     config = SimulationConfiguration(
-        duration=10000
+        duration=100000
     )
     builder = SimulationBuilder(config)
 
