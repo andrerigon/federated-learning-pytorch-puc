@@ -11,6 +11,7 @@ def main():
     # Configuring simulation
     config = SimulationConfiguration(
         duration=100000
+        # duration=20000
     )
     builder = SimulationBuilder(config)
 

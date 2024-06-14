@@ -40,11 +40,9 @@ class SimpleMessage(TypedDict):
     packet_count: int
     sender_type: int
     sender: int
+    payload: str
+    type: str
 
-
-class ModelUpdate:
-    state_dict_json: str
-    sender: int
 
 
 def report_message(message: SimpleMessage) -> str:
@@ -158,19 +156,21 @@ class SimpleSensorProtocol(IProtocol):
     def handle_packet(self, message: str) -> None:
         simple_message: SimpleMessage = json.loads(message)
         # self._log.info(report_message(simple_message))
-        self._log.info(f'sensor received from sender: {simple_message['sender_type']} and mode updated is {self.model_updated}')
+        # self._log.info(f'sensor received from sender: {simple_message['sender_type']} and mode updated is {self.model_updated}')
         if simple_message['sender_type'] == SimpleSender.UAV.value and self.model_updated:
+            
             self.model_updated = False
             # response: SimpleMessage = {
             #     'packet_count': self.packet_count,
             #     'sender_type': SimpleSender.SENSOR.value,
             #     'sender': self.provider.get_id()
             # }
-            response: ModelUpdate = {
-                'state_dict_json': self.serialize_state_dict(self.current_state),
-                'sender': self.id
+            response: SimpleMessage = {
+                'payload': self.serialize_state_dict(self.current_state),
+                'sender': self.id,
+                'packet_count': self.packet_count,
+                'type': 'model_update'
             }
-
 
 
             command = SendMessageCommand(json.dumps(response), simple_message['sender'])
@@ -178,7 +178,12 @@ class SimpleSensorProtocol(IProtocol):
 
             # self._log.info(f"Sent {response['packet_count']} packets to UAV {simple_message['sender']}")
 
-            self.packet_count = 0
+            self.packet_count += 1
+        if simple_message['type'] == 'model_update':
+            self._log.info(f"Got model update from UVA")
+            state = decompress_and_deserialize_state_dict(simple_message['payload'])
+            self.global_model.load_state_dict(state)
+
 
     def handle_telemetry(self, telemetry: Telemetry) -> None:
         pass
@@ -233,6 +238,7 @@ class SimpleUAVProtocol(IProtocol):
         self._log = logging.getLogger()
         self.packet_count = 0
 
+        self.id = self.provider.get_id()
         self._mission = MissionMobilityPlugin(self, MissionMobilityConfiguration(
             loop_mission=LoopMission.REVERSE,
         ))
@@ -243,13 +249,35 @@ class SimpleUAVProtocol(IProtocol):
 
         self._send_heartbeat()
 
+    def serialize_state_dict(self, state_dict):
+        # Serialize the entire state_dict to a byte stream
+        buffer = BytesIO()
+        torch.save(state_dict, buffer)
+        buffer.seek(0)
+        
+        # Compress the byte stream
+        compressed_buffer = BytesIO()
+        with gzip.GzipFile(fileobj=compressed_buffer, mode='wb') as f:
+            f.write(buffer.getvalue())
+        
+        compressed_data = compressed_buffer.getvalue()
+        
+        # Encode the compressed data to base64
+        compressed_base64 = base64.b64encode(compressed_data).decode('utf-8')
+        
+        # Log the size of the compressed data
+        logging.info(f"Serialized and compressed state_dict size: {len(compressed_data)} bytes")
+        
+        return json.dumps(compressed_base64)    
+
     def _send_heartbeat(self) -> None:
         # self._log.info(f"Sending heartbeat, current count {self.packet_count}")
 
         message: SimpleMessage = {
             'packet_count': self.packet_count,
             'sender_type': SimpleSender.UAV.value,
-            'sender': self.provider.get_id()
+            'sender': self.provider.get_id(),
+            'type': 'ping'
         }
         command = BroadcastMessageCommand(json.dumps(message))
         self.provider.send_communication_command(command)
@@ -270,11 +298,23 @@ class SimpleUAVProtocol(IProtocol):
 
     def handle_packet(self, message: str) -> None:
         self._log.info(f'got message with size: {len(message)}')
-        message: ModelUpdate = json.loads(message)
+        message: SimpleMessage = json.loads(message)
 
-        decompressed_state_dict = decompress_and_deserialize_state_dict(message['state_dict_json'])
+        decompressed_state_dict = decompress_and_deserialize_state_dict(message['payload'])
         self.update_global_model_with_client(decompressed_state_dict)
-        self._log.info(f'got model: {self.model}')
+        self._log.info(f'Sending model update')
+
+        message: SimpleMessage = {
+                'sender_type': SimpleSender.UAV.value,
+                'payload': self.serialize_state_dict(self.model.state_dict()),
+                'sender': self.id,
+                'packet_count': self.packet_count,
+                'type': 'model_update'
+            }
+
+
+        command = BroadcastMessageCommand(json.dumps(message))
+        self.provider.send_communication_command(command)
         
         # simple_message: SimpleMessage = json.loads(message)
         # self._log.info(report_message(simple_message))
