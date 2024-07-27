@@ -5,12 +5,10 @@ from gradysim.simulator.handler.visualization import VisualizationHandler, Visua
 from gradysim.simulator.simulation import SimulationBuilder, SimulationConfiguration
 from simple_protocol import SimpleSensorProtocol, SimpleGroundStationProtocol, SimpleUAVProtocol
 
-
-
 def main():
     # Configuring simulation
     config = SimulationConfiguration(
-        duration=100000
+        duration=2000
         # duration=20000
     )
     builder = SimulationBuilder(config)
@@ -45,32 +43,6 @@ def main():
     # Building & starting
     simulation = builder.build()
     simulation.start_simulation()
-
-import torch
-import base64
-import json
-from io import BytesIO
-from collections import OrderedDict
-
-def serialize_state_dict(state_dict):
-    serialized_dict = {}
-    for key, tensor in state_dict.items():
-        buffer = BytesIO()
-        torch.save(tensor, buffer)
-        tensor_bytes = buffer.getvalue()
-        tensor_base64 = base64.b64encode(tensor_bytes).decode('utf-8')
-        serialized_dict[key] = tensor_base64
-    return json.dumps(serialized_dict)
-
-def deserialize_state_dict(serialized_state_dict):
-    state_dict = json.loads(serialized_state_dict)
-    deserialized_dict = OrderedDict()
-    for key, tensor_base64 in state_dict.items():
-        tensor_bytes = base64.b64decode(tensor_base64.encode('utf-8'))
-        buffer = BytesIO(tensor_bytes)
-        tensor = torch.load(buffer)
-        deserialized_dict[key] = tensor
-    return deserialized_dict
 
 if __name__ == "__main__":
     main()

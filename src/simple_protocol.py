@@ -78,7 +78,8 @@ class SimpleSensorProtocol(IProtocol):
         while not self.finished:
             self.train()    
 
-    
+    def finish(self) -> None:
+        logging.info(f"Meg meg!")
 
     def train(self, epochs = 1):
         # Specify the quantization engine
@@ -421,3 +422,4 @@ class SimpleGroundStationProtocol(IProtocol):
 
     def finish(self) -> None:
         self._log.info(f"Final packet count: {self.packet_count}")
+
