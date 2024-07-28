@@ -65,7 +65,7 @@ class SimpleSensorProtocol(IProtocol):
         self.id = self.provider.get_id()
 
         self.global_model = Autoencoder().to(device)
-        self.loader = DataLoader(self.splited_dataset[self.id], batch_size=4, shuffle=True, num_workers=2)
+        self.loader = DataLoader(self.splited_dataset[self.id], batch_size=4, shuffle=True, num_workers=8, pin_memory=True)
 
         self.thread = threading.Thread(target=self.start_training)
         self.finished = False
@@ -90,7 +90,7 @@ class SimpleSensorProtocol(IProtocol):
             torch.autograd.set_detect_anomaly(True)
 
             criterion = nn.MSELoss()
-            optimizer = optim.AdamW(self.global_model.parameters(), lr=0.0001, weight_decay=1e-5)  # Reduced learning rate
+            optimizer = optim.AdamW(self.global_model.parameters(), lr=0.001, weight_decay=1e-4)
             scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
             for epoch in range(epochs):
