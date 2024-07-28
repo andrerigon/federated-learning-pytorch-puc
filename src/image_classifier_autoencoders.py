@@ -52,6 +52,10 @@ class Autoencoder(nn.Module):
             nn.ReLU(True),
             nn.Conv2d(32, 64, 3, stride=2, padding=1),  # b, 64, 8, 8
             nn.BatchNorm2d(64),
+            nn.Conv2d(64, 64, 3, stride=2, padding=1),  # b, 64, 8, 8
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64, 64, 3, stride=2, padding=1),  # b, 64, 8, 8
+            nn.BatchNorm2d(64),
             nn.ReLU(True),
             nn.Conv2d(64, 128, 3, stride=2, padding=1),  # b, 128, 4, 4
             nn.BatchNorm2d(128),

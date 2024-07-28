@@ -3,12 +3,21 @@ from gradysim.simulator.handler.mobility import MobilityHandler
 from gradysim.simulator.handler.timer import TimerHandler
 from gradysim.simulator.handler.visualization import VisualizationHandler, VisualizationConfiguration
 from gradysim.simulator.simulation import SimulationBuilder, SimulationConfiguration
-from simple_protocol import SimpleSensorProtocol, SimpleGroundStationProtocol, SimpleUAVProtocol
+from uav_protocol import SimpleUAVProtocol
+from sensor_protocol import SimpleSensorProtocol
+import argparse
 
 def main():
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Federated Learning with Autoencoders on CIFAR-10')
+    parser.add_argument('--duration', type=int, default=5000, help='Duration')
+
+    args = parser.parse_args()
+
     # Configuring simulation
     config = SimulationConfiguration(
-        duration=2000
+        duration=args.duration,
+        execution_logging=False
         # duration=20000
     )
     builder = SimulationBuilder(config)
@@ -35,9 +44,10 @@ def main():
     )))
     builder.add_handler(MobilityHandler())
     builder.add_handler(VisualizationHandler(VisualizationConfiguration(
-        x_range=(-150, 150),
-        y_range=(-150, 150),
-        z_range=(0, 150)
+        x_range=(-200, 200),
+        y_range=(-200, 200),
+        z_range=(0, 200),
+        open_browser=False
     )))
 
     # Building & starting

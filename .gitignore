@@ -1,3 +1,10 @@
 venv/
 __pycache__/
 *.pyc
+output
+data
+flwr-poc
+.DS_Store
+*.pth
+*.pth_bck
+stderr.log
