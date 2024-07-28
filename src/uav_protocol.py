@@ -28,18 +28,7 @@ from gradysim.protocol.messages.communication import SendMessageCommand, Broadca
 from gradysim.protocol.messages.telemetry import Telemetry
 from gradysim.protocol.plugin.mission_mobility import MissionMobilityPlugin, MissionMobilityConfiguration, LoopMission
 from image_classifier_autoencoders import download_dataset, split_dataset, Autoencoder, device
-
-class SimpleSender(enum.Enum):
-    SENSOR = 0
-    UAV = 1
-    GROUND_STATION = 2
-
-class SimpleMessage(TypedDict):
-    packet_count: int
-    sender_type: int
-    sender: int
-    payload: str
-    type: str
+from sensor_protocol import SimpleMessage, SimpleSender
 
 def report_message(message: SimpleMessage) -> str:
     return ''
@@ -143,6 +132,8 @@ class SimpleUAVProtocol(IProtocol):
         self._mission.start_mission(mission_list)
         self.model = Autoencoder().to(device)
         self._send_heartbeat()
+        self.training_cycles = {}
+        self.model_updates = {}
 
     def serialize_state_dict(self, state_dict):
         buffer = BytesIO()
@@ -181,6 +172,8 @@ class SimpleUAVProtocol(IProtocol):
     def handle_packet(self, message: str) -> None:
         # self._log.info(f'got message with size: {len(message)}')
         message: SimpleMessage = json.loads(message)
+        self.training_cycles[message['sender']] = message['training_cycles']
+        self.model_updates[message['sender']] = message['model_updates']
         decompressed_state_dict = decompress_and_deserialize_state_dict(message['payload'])
         self.update_global_model_with_client(decompressed_state_dict)
         self._log.info(f'Sending model update')
@@ -229,9 +222,11 @@ class SimpleUAVProtocol(IProtocol):
 
         torch.save(self.model.state_dict(), os.path.join(output_dir, 'model.pth'))
         with open(os.path.join(output_dir, 'stats.txt'), 'w') as f:
-            f.write(f'Mean Squared Error: {mean_mse}\\n')
-            f.write(f'Clustering Accuracy: {accuracy}\\n')
-            f.write(f'Adjusted Rand Index: {ari}\\n')
+            f.write(f'Mean Squared Error: {mean_mse}\n')
+            f.write(f'Clustering Accuracy: {accuracy}\n')
+            f.write(f'Adjusted Rand Index: {ari}\n')
+            f.write(f'Model Updates: {self.model_updates}\n')
+            f.write(f'Training Cycles: {self.training_cycles}\n')
 
 def extract_features(dataloader, model):
     model.eval()

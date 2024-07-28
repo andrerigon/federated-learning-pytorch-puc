@@ -47,36 +47,40 @@ class Autoencoder(nn.Module):
     def __init__(self):
         super(Autoencoder, self).__init__()
         self.encoder = nn.Sequential(
-            nn.Conv2d(3, 64, 3, stride=2, padding=1),  # b, 64, 16, 16
+            nn.Conv2d(3, 32, 3, stride=2, padding=1),  # b, 32, 16, 16
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1),  # b, 64, 8, 8
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64, 64, 3, stride=2, padding=1),  # b, 64, 8, 8
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64, 64, 3, stride=2, padding=1),  # b, 64, 8, 8
             nn.BatchNorm2d(64),
             nn.ReLU(True),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),  # b, 128, 8, 8
+            nn.Conv2d(64, 128, 3, stride=2, padding=1),  # b, 128, 4, 4
             nn.BatchNorm2d(128),
             nn.ReLU(True),
-            nn.Conv2d(128, 256, 3, stride=2, padding=1),  # b, 256, 4, 4
+            nn.Conv2d(128, 256, 3, stride=2, padding=1),  # b, 256, 2, 2
             nn.BatchNorm2d(256),
             nn.ReLU(True),
-            nn.Conv2d(256, 512, 3, stride=2, padding=1),  # b, 512, 2, 2
+            nn.Conv2d(256, 512, 3, stride=2, padding=1),  # b, 512, 1, 1
             nn.BatchNorm2d(512),
-            nn.ReLU(True),
-            nn.Conv2d(512, 1024, 3, stride=2, padding=1),  # b, 1024, 1, 1
-            nn.BatchNorm2d(1024),
             nn.ReLU(True)
         )
         self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(1024, 512, 3, stride=2, padding=1, output_padding=1),  # b, 512, 2, 2
-            nn.BatchNorm2d(512),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(512, 256, 3, stride=2, padding=1, output_padding=1),  # b, 256, 4, 4
+            nn.ConvTranspose2d(512, 256, 3, stride=2, padding=1, output_padding=1),  # b, 256, 2, 2
             nn.BatchNorm2d(256),
             nn.ReLU(True),
-            nn.ConvTranspose2d(256, 128, 3, stride=2, padding=1, output_padding=1),  # b, 128, 8, 8
+            nn.ConvTranspose2d(256, 128, 3, stride=2, padding=1, output_padding=1),  # b, 128, 4, 4
             nn.BatchNorm2d(128),
             nn.ReLU(True),
-            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),  # b, 64, 16, 16
+            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),  # b, 64, 8, 8
             nn.BatchNorm2d(64),
             nn.ReLU(True),
-            nn.ConvTranspose2d(64, 3, 3, stride=2, padding=1, output_padding=1),  # b, 3, 32, 32
+            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),  # b, 32, 16, 16
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(32, 3, 3, stride=2, padding=1, output_padding=1),  # b, 3, 32, 32
             nn.Sigmoid()
         )
 
@@ -105,6 +109,7 @@ def download_dataset():
     testset = torchvision.datasets.CIFAR10(root='./data', train=False,
                                            download=True, transform=transform)
     return trainset, testset
+    
 
 # Function to split dataset into subsets for each client
 def split_dataset(dataset, num_clients):

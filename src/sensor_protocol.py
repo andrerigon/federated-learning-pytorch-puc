@@ -41,8 +41,8 @@ class SimpleMessage(TypedDict):
     sender: int
     payload: str
     type: str
-
-
+    training_cycles: int
+    model_updates: int
 
 def report_message(message: SimpleMessage) -> str:
     return ''
@@ -56,16 +56,19 @@ class SimpleSensorProtocol(IProtocol):
     remaining_energy: int
 
     def initialize(self) -> None:
-        self.remaining_energy = random_integer = random.randint(1, 5)
+        self.remaining_energy = random.randint(1, 5)
         self._log = logging.getLogger()
         self.packet_count = 0
        
         self.trainset, self.testset = download_dataset()
         self.splited_dataset = split_dataset(self.trainset, 4)
         self.id = self.provider.get_id()
+        self.global_model_changed = False
 
         self.global_model = Autoencoder().to(device)
-        self.loader = DataLoader(self.splited_dataset[self.id], batch_size=4, shuffle=True, num_workers=8, pin_memory=True)
+        self.loader = DataLoader(self.splited_dataset[self.id], batch_size=4, shuffle=True, num_workers=4)
+        self.training_cycles = 0
+        self.model_updates = 0
 
         self.thread = threading.Thread(target=self.start_training)
         self.finished = False
@@ -84,13 +87,13 @@ class SimpleSensorProtocol(IProtocol):
             local_model = Autoencoder().to(device)
             local_model.load_state_dict(self.global_model.state_dict())
             local_model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
-            local_model = torch.quantization.prepare_qat(local_model, inplace=False)
+            local_model = torch.quantization.prepare_qat(local_model, inplace=True)
 
             # Set anomaly detection to identify where the backward pass fails
             torch.autograd.set_detect_anomaly(True)
 
             criterion = nn.MSELoss()
-            optimizer = optim.AdamW(self.global_model.parameters(), lr=0.001, weight_decay=1e-4)
+            optimizer = optim.AdamW(self.global_model.parameters(), lr=0.0001, weight_decay=1e-5)  # Reduced learning rate
             scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
             for epoch in range(epochs):
@@ -102,6 +105,14 @@ class SimpleSensorProtocol(IProtocol):
                     if self.finished:
                         break
                     inputs = data[0].to(device)
+
+                    if self.global_model_changed:
+                        self.global_model_changed = False
+                        dict = self.merge_dict(local_model.state_dict())
+                        local_model = Autoencoder().to(device)
+                        local_model.load_state_dict(dict)
+                        local_model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
+                        local_model = torch.quantization.prepare_qat(local_model, inplace=True)
 
                     optimizer.zero_grad()
 
@@ -121,6 +132,8 @@ class SimpleSensorProtocol(IProtocol):
                     progress_bar.set_postfix(loss=running_loss / (i + 1))
                 scheduler.step()
             
+            self.training_cycles += 1
+
             if self.finished:
                 return
             
@@ -133,17 +146,11 @@ class SimpleSensorProtocol(IProtocol):
         except Exception as e:
             logging.error(f"Error in client {self.id}", exc_info=True)
 
-    # def _generate_packet(self) -> None:
-    #     if self.remaining_energy <= 0:
-    #         self._log.info(f"Device energy level is low. Won't send packages")
-    #         return 
-    
-
-    #     if self.model_updated: 
-    #         self.packet_count += 1
-    #         # self._log.info(f"Trained concluded packet, current count {self.packet_count}")
-    #         self.provider.schedule_timer("", self.provider.current_time() + 10000)
-    #         self.remaining_energy -= 1
+    def merge_dict(self, client_dict, alpha=0.1):
+        global_dict = self.global_model.state_dict()
+        for k in global_dict.keys():
+            global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
+        return global_dict
 
     def handle_timer(self, timer: str) -> None:
         self._generate_packet()
@@ -177,30 +184,25 @@ class SimpleSensorProtocol(IProtocol):
         if simple_message['sender_type'] == SimpleSender.UAV.value and self.model_updated:
             print(f"\n\n [{self.id}] Local Model updated! \n\n")
             self.model_updated = False
-            # response: SimpleMessage = {
-            #     'packet_count': self.packet_count,
-            #     'sender_type': SimpleSender.SENSOR.value,
-            #     'sender': self.provider.get_id()
-            # }
             response: SimpleMessage = {
                 'payload': self.serialize_state_dict(self.current_state),
                 'sender': self.id,
                 'packet_count': self.packet_count,
-                'type': 'model_update'
+                'type': 'model_update',
+                'training_cycles': self.training_cycles,
+                'model_updates': self.model_updates
             }
-
 
             command = SendMessageCommand(json.dumps(response), simple_message['sender'])
             self.provider.send_communication_command(command)
-
-            # self._log.info(f"Sent {response['packet_count']} packets to UAV {simple_message['sender']}")
 
             self.packet_count += 1
         if simple_message['type'] == 'model_update':
             print(f"\n\n [{self.id}] Got model update from UVA! \n\n")
             state = decompress_and_deserialize_state_dict(simple_message['payload'])
             self.global_model.load_state_dict(state)
-
+            self.global_model_changed = True
+            self.model_updates += 1
 
     def handle_telemetry(self, telemetry: Telemetry) -> None:
         pass
