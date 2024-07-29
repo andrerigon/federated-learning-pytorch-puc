@@ -130,10 +130,29 @@ class SimpleUAVProtocol(IProtocol):
         self.id = self.provider.get_id()
         self._mission = MissionMobilityPlugin(self, MissionMobilityConfiguration(loop_mission=LoopMission.REVERSE))
         self._mission.start_mission(mission_list)
-        self.model = Autoencoder().to(device)
+        self.model = self.load_model()
         self._send_heartbeat()
         self.training_cycles = {}
         self.model_updates = {}
+
+    def load_model(self):
+        model_path = self.get_last_model_path()
+        model = Autoencoder().to(device)
+        if model_path:
+            model.load_state_dict(torch.load(model_path))
+            print(f"Model loaded from {model_path}")
+        return model
+
+    def get_last_model_path(self):
+        output_base_dir = 'output'
+        if not os.path.exists(output_base_dir):
+            return None
+        dirs = sorted([d for d in os.listdir(output_base_dir) if os.path.isdir(os.path.join(output_base_dir, d))], reverse=True)
+        if not dirs:
+            return None
+        latest_dir = os.path.join(output_base_dir, dirs[0])
+        model_path = os.path.join(latest_dir, 'model.pth')
+        return model_path if os.path.exists(model_path) else None    
 
     def serialize_state_dict(self, state_dict):
         buffer = BytesIO()

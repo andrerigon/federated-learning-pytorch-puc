@@ -3,31 +3,27 @@ import json
 import logging
 import random
 from typing import TypedDict
-from collections import OrderedDict
 import base64
 import json
 from io import BytesIO
 from io import BytesIO
 import logging
 import gzip
-import numpy as np
 import torch.nn as nn
-from sklearn.cluster import KMeans
-from sklearn.metrics import accuracy_score, adjusted_rand_score
+import os
 
 from gradysim.protocol.interface import IProtocol
-from gradysim.protocol.messages.communication import SendMessageCommand, BroadcastMessageCommand
+from gradysim.protocol.messages.communication import SendMessageCommand
 from gradysim.protocol.messages.telemetry import Telemetry
 
 from image_classifier_autoencoders import download_dataset, split_dataset, Autoencoder, device
-from torch.utils.data import Subset, DataLoader
+from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 
 import threading
 import torch
-
 
 class SimpleSender(enum.Enum):
     SENSOR = 0
@@ -65,8 +61,8 @@ class SimpleSensorProtocol(IProtocol):
         self.id = self.provider.get_id()
         self.global_model_changed = False
 
-        self.global_model = Autoencoder().to(device)
-        self.loader = DataLoader(self.splited_dataset[self.id], batch_size=4, shuffle=True, num_workers=4)
+        self.global_model = self.load_model()
+        self.loader = DataLoader(self.splited_dataset[self.id], batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
         self.training_cycles = 0
         self.model_updates = 0
 
@@ -74,6 +70,25 @@ class SimpleSensorProtocol(IProtocol):
         self.finished = False
         self.model_updated = False
         self.thread.start()
+
+    def load_model(self):
+        model_path = self.get_last_model_path()
+        model = Autoencoder().to(device)
+        if model_path:
+            model.load_state_dict(torch.load(model_path))
+            print(f"Model loaded from {model_path}")
+        return model
+
+    def get_last_model_path(self):
+        output_base_dir = 'output'
+        if not os.path.exists(output_base_dir):
+            return None
+        dirs = sorted([d for d in os.listdir(output_base_dir) if os.path.isdir(os.path.join(output_base_dir, d))], reverse=True)
+        if not dirs:
+            return None
+        latest_dir = os.path.join(output_base_dir, dirs[0])
+        model_path = os.path.join(latest_dir, 'model.pth')
+        return model_path if os.path.exists(model_path) else None        
         
 
     def start_training(self):
@@ -93,8 +108,8 @@ class SimpleSensorProtocol(IProtocol):
             torch.autograd.set_detect_anomaly(True)
 
             criterion = nn.MSELoss()
-            optimizer = optim.AdamW(self.global_model.parameters(), lr=0.0001, weight_decay=1e-5)  # Reduced learning rate
-            scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+            optimizer = optim.AdamW(local_model.parameters(), lr=0.001, weight_decay=1e-5)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10)
 
             for epoch in range(epochs):
                 if self.finished:
@@ -106,19 +121,19 @@ class SimpleSensorProtocol(IProtocol):
                         break
                     inputs = data[0].to(device)
 
-                    if self.global_model_changed:
-                        self.global_model_changed = False
-                        dict = self.merge_dict(local_model.state_dict())
-                        local_model = Autoencoder().to(device)
-                        local_model.load_state_dict(dict)
-                        local_model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
-                        local_model = torch.quantization.prepare_qat(local_model, inplace=True)
+                    # if self.global_model_changed:
+                        # self.global_model_changed = False
+                        # dict = self.merge_dict(local_model.state_dict())
+                        # local_model = Autoencoder().to(device)
+                        # local_model.load_state_dict(dict)
+                        # local_model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
+                        # local_model = torch.quantization.prepare_qat(local_model, inplace=True)
 
                     optimizer.zero_grad()
 
                     # Forward pass
                     outputs = local_model(inputs)
-                    
+
                     # Compute loss
                     loss = criterion(outputs, inputs)
 
@@ -130,13 +145,13 @@ class SimpleSensorProtocol(IProtocol):
 
                     running_loss += loss.item()
                     progress_bar.set_postfix(loss=running_loss / (i + 1))
-                scheduler.step()
-            
+                scheduler.step(running_loss / len(self.loader))
+
             self.training_cycles += 1
 
             if self.finished:
                 return
-            
+
             # Convert the model to a quantized version
             local_model.eval()
             local_model = torch.quantization.convert(local_model)
