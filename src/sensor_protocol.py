@@ -62,7 +62,7 @@ class SimpleSensorProtocol(IProtocol):
         self.global_model_changed = False
 
         self.global_model = self.load_model()
-        self.loader = DataLoader(self.splited_dataset[self.id], batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
+        self.loader = DataLoader(self.splited_dataset[self.id], batch_size=32, shuffle=True, num_workers=10, pin_memory=True)
         self.training_cycles = 0
         self.model_updates = 0
 
@@ -240,3 +240,4 @@ def decompress_and_deserialize_state_dict(serialized_state_dict):
     
     # Deserialize the state_dict
     return torch.load(buffer)
+

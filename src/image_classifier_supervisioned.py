@@ -184,7 +184,7 @@ def main():
     parser.add_argument('--num_clients', type=int, default=10, help='Number of clients')
     parser.add_argument('--epochs', type=int, default=20, help='Number of epochs')
     parser.add_argument('--max_workers', type=int, default=10, help='Maximum number of workers')
-    parser.add_argument('--batch_size', type=int, default=4, help='Batch size for DataLoader')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for DataLoader')
 
     args = parser.parse_args()
 
