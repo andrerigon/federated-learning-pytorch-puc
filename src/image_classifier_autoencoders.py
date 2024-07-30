@@ -21,7 +21,7 @@ logging.basicConfig(filename='stderr.log', level=logging.ERROR,
                     format='%(asctime)s %(levelname)s %(message)s')
 console = logging.StreamHandler(sys.stdout)
 console.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+formatter = logging.Formatter('%(asctime)s %(message)s')
 console.setFormatter(formatter)
 logging.getLogger('').addHandler(console)
 
@@ -88,7 +88,6 @@ def download_dataset():
     testset = torchvision.datasets.CIFAR10(root='./data', train=False,
                                            download=True, transform=transform)
     return trainset, testset
-    
 
 # Function to split dataset into subsets for each client
 def split_dataset(dataset, num_clients):
@@ -244,4 +243,3 @@ def main():
 if __name__ == '__main__':
     mp.set_start_method('spawn')
     main()
-

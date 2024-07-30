@@ -27,7 +27,8 @@ from gradysim.protocol.interface import IProtocol
 from gradysim.protocol.messages.communication import SendMessageCommand, BroadcastMessageCommand
 from gradysim.protocol.messages.telemetry import Telemetry
 from gradysim.protocol.plugin.mission_mobility import MissionMobilityPlugin, MissionMobilityConfiguration, LoopMission
-from image_classifier_autoencoders import download_dataset, split_dataset, Autoencoder, device
+from image_classifier_autoencoders import download_dataset, split_dataset, Autoencoder, device as ae_device
+from image_classifier_supervisioned import SupervisedModel, device as sup_device
 from sensor_protocol import SimpleMessage, SimpleSender
 
 def report_message(message: SimpleMessage) -> str:
@@ -124,6 +125,9 @@ class SimpleUAVProtocol(IProtocol):
     packet_count: int
     _mission: MissionMobilityPlugin
 
+    # Class variable for training mode
+    training_mode = 'autoencoder'    
+
     def initialize(self) -> None:
         self._log = logging.getLogger()
         self.packet_count = 0
@@ -137,22 +141,52 @@ class SimpleUAVProtocol(IProtocol):
 
     def load_model(self):
         model_path = self.get_last_model_path()
-        model = Autoencoder().to(device)
+        if SimpleUAVProtocol.training_mode == 'autoencoder':
+            model = Autoencoder().to(ae_device)
+        else:
+            model = SupervisedModel().to(sup_device)
+
         if model_path:
             model.load_state_dict(torch.load(model_path))
             print(f"Model loaded from {model_path}")
         return model
 
+    # def get_last_model_path(self):
+    #     output_base_dir = 'output'
+    #     mode_dir = 'autoencoder' if SimpleUAVProtocol.training_mode == 'autoencoder' else 'supervisioned'
+    #     output_base_dir = os.path.join(output_base_dir, mode_dir)
+    #     print(f"{output_base_dir} {mode_dir} => {os.path.exists(output_base_dir)}")
+    #     if not os.path.exists(output_base_dir):
+    #         return None
+    #     dirs = sorted([d for d in os.listdir(output_base_dir) if os.path.isdir(os.path.join(output_base_dir, d))], reverse=True)
+    #     print(f"\n\n\n => {output_base_dir} {dirs}\n\n")
+    #     if not dirs:
+    #         return None
+    #     latest_dir = os.path.join(output_base_dir, dirs[0])
+    #     model_path = os.path.join(latest_dir, 'model.pth')
+    #     return model_path if os.path.exists(model_path) else None    
+    
     def get_last_model_path(self):
         output_base_dir = 'output'
+        mode_dir = SimpleUAVProtocol.training_mode 
+        
         if not os.path.exists(output_base_dir):
             return None
+        
+        # Find the latest directory inside 'output'
         dirs = sorted([d for d in os.listdir(output_base_dir) if os.path.isdir(os.path.join(output_base_dir, d))], reverse=True)
-        if not dirs:
-            return None
-        latest_dir = os.path.join(output_base_dir, dirs[0])
-        model_path = os.path.join(latest_dir, 'model.pth')
-        return model_path if os.path.exists(model_path) else None    
+        
+        # print(f"\n\n\n => {dirs}")
+        for d in dirs:
+            latest_mode_dir = os.path.join(output_base_dir, d, mode_dir)
+            # print(f"\n\n\n => {latest_mode_dir}")
+            if os.path.exists(latest_mode_dir):
+                model_path = os.path.join(latest_mode_dir, 'model.pth')
+                # print(f"\n\n\n => {model_path} => {os.path.exists(model_path)}")
+                if os.path.exists(model_path):
+                    return model_path
+        
+        return None
 
     def serialize_state_dict(self, state_dict):
         buffer = BytesIO()
@@ -189,7 +223,6 @@ class SimpleUAVProtocol(IProtocol):
         self._send_heartbeat()
 
     def handle_packet(self, message: str) -> None:
-        # self._log.info(f'got message with size: {len(message)}')
         message: SimpleMessage = json.loads(message)
         self.training_cycles[message['sender']] = message['training_cycles']
         self.model_updates[message['sender']] = message['model_updates']
@@ -212,19 +245,25 @@ class SimpleUAVProtocol(IProtocol):
     def finish(self) -> None:
         _, testset = download_dataset()
         testloader = DataLoader(testset, batch_size=4, shuffle=False, num_workers=2)
-        output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+        output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'), SimpleUAVProtocol.training_mode)
         os.makedirs(output_dir, exist_ok=True)
         self.check(testloader, output_dir)
         self._log.info(f"Final packet count: {self.packet_count}")
 
     def check(self, testloader, output_dir):
+        if SimpleUAVProtocol.training_mode == 'autoencoder':
+            self.check_autoencoder(testloader, output_dir)
+        else:
+            self.check_supervisioned(testloader, output_dir)
+
+    def check_autoencoder(self, testloader, output_dir):
         criterion = nn.MSELoss()
         total_loss = 0
         mse_values = []
         with tqdm(total=len(testloader), desc="Testing Progress") as progress_bar:
             with torch.no_grad():
                 for data in testloader:
-                    images = data[0].to(device)
+                    images = data[0].to(ae_device)
                     outputs = self.model(images)
                     loss = criterion(outputs, images)
                     total_loss += loss.item()
@@ -247,13 +286,42 @@ class SimpleUAVProtocol(IProtocol):
             f.write(f'Model Updates: {self.model_updates}\n')
             f.write(f'Training Cycles: {self.training_cycles}\n')
 
+    def check_supervisioned(self, testloader, output_dir):
+        criterion = nn.CrossEntropyLoss()
+        total_loss = 0
+        correct = 0
+        total = 0
+        with tqdm(total=len(testloader), desc="Testing Progress") as progress_bar:
+            with torch.no_grad():
+                for data in testloader:
+                    images, labels = data[0].to(sup_device), data[1].to(sup_device)
+                    outputs = self.model(images)
+                    loss = criterion(outputs, labels)
+                    total_loss += loss.item()
+                    _, predicted = torch.max(outputs.data, 1)
+                    total += labels.size(0)
+                    correct += (predicted == labels).sum().item()
+                    progress_bar.update(1)
+
+        accuracy = 100 * correct / total
+        mean_loss = total_loss / len(testloader)
+        print(f'Mean Loss of the network on the test images: {mean_loss}')
+        print(f'Accuracy of the network on the test images: {accuracy}%')
+
+        torch.save(self.model.state_dict(), os.path.join(output_dir, 'model.pth'))
+        with open(os.path.join(output_dir, 'stats.txt'), 'w') as f:
+            f.write(f'Mean Loss: {mean_loss}\n')
+            f.write(f'Accuracy: {accuracy}%\n')
+            f.write(f'Model Updates: {self.model_updates}\n')
+            f.write(f'Training Cycles: {self.training_cycles}\n')
+
 def extract_features(dataloader, model):
     model.eval()
     features = []
     labels = []
     with torch.no_grad():
         for data in dataloader:
-            images, targets = data[0].to(device), data[1]
+            images, targets = data[0].to(ae_device), data[1]
             encoded = model.encoder(images)
             features.append(encoded.view(encoded.size(0), -1).cpu().numpy())
             labels.append(targets.cpu().numpy())

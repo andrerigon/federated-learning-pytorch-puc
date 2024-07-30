@@ -6,8 +6,6 @@ from typing import TypedDict
 import base64
 import json
 from io import BytesIO
-from io import BytesIO
-import logging
 import gzip
 import torch.nn as nn
 import os
@@ -16,9 +14,9 @@ from gradysim.protocol.interface import IProtocol
 from gradysim.protocol.messages.communication import SendMessageCommand
 from gradysim.protocol.messages.telemetry import Telemetry
 
-from image_classifier_autoencoders import download_dataset, split_dataset, Autoencoder, device
+from image_classifier_autoencoders import download_dataset, split_dataset, Autoencoder, device as ae_device
+from image_classifier_supervisioned import SupervisedModel, device as sup_device
 from torch.utils.data import DataLoader
-import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 
@@ -29,7 +27,6 @@ class SimpleSender(enum.Enum):
     SENSOR = 0
     UAV = 1
     GROUND_STATION = 2
-
 
 class SimpleMessage(TypedDict):
     packet_count: int
@@ -42,20 +39,19 @@ class SimpleMessage(TypedDict):
 
 def report_message(message: SimpleMessage) -> str:
     return ''
-    # return (f"Received message with {message['packet_count']} packets from "
-            # f"{SimpleSender(message['sender_type']).name} {message['sender']}")
-
 
 class SimpleSensorProtocol(IProtocol):
     _log: logging.Logger
     packet_count: int
     remaining_energy: int
 
+    training_mode = "autoencoder"
+
     def initialize(self) -> None:
         self.remaining_energy = random.randint(1, 5)
         self._log = logging.getLogger()
         self.packet_count = 0
-       
+        
         self.trainset, self.testset = download_dataset()
         self.splited_dataset = split_dataset(self.trainset, 4)
         self.id = self.provider.get_id()
@@ -73,7 +69,11 @@ class SimpleSensorProtocol(IProtocol):
 
     def load_model(self):
         model_path = self.get_last_model_path()
-        model = Autoencoder().to(device)
+        if SimpleSensorProtocol.training_mode == 'autoencoder':
+            model = Autoencoder().to(ae_device)
+        else:
+            model = SupervisedModel().to(sup_device)
+
         if model_path:
             model.load_state_dict(torch.load(model_path))
             print(f"Model loaded from {model_path}")
@@ -81,30 +81,41 @@ class SimpleSensorProtocol(IProtocol):
 
     def get_last_model_path(self):
         output_base_dir = 'output'
+        mode_dir = SimpleSensorProtocol.training_mode 
+        
         if not os.path.exists(output_base_dir):
             return None
-        dirs = sorted([d for d in os.listdir(output_base_dir) if os.path.isdir(os.path.join(output_base_dir, d))], reverse=True)
-        if not dirs:
-            return None
-        latest_dir = os.path.join(output_base_dir, dirs[0])
-        model_path = os.path.join(latest_dir, 'model.pth')
-        return model_path if os.path.exists(model_path) else None        
         
+        # Find the latest directory inside 'output'
+        dirs = sorted([d for d in os.listdir(output_base_dir) if os.path.isdir(os.path.join(output_base_dir, d))], reverse=True)
+        
+        # print(f"\n\n\n => {dirs}")
+        for d in dirs:
+            latest_mode_dir = os.path.join(output_base_dir, d, mode_dir)
+            # print(f"\n\n\n => {latest_mode_dir}")
+            if os.path.exists(latest_mode_dir):
+                model_path = os.path.join(latest_mode_dir, 'model.pth')
+                # print(f"\n\n\n => {model_path} => {os.path.exists(model_path)}")
+                if os.path.exists(model_path):
+                    return model_path
+        
+        return None   
 
     def start_training(self):
         while not self.finished:
-            self.train()            
+            if SimpleSensorProtocol.training_mode == 'autoencoder':
+                self.train_autoencoder()
+            else:
+                self.train_supervisioned()
 
-    def train(self, epochs=1):
-        # Specify the quantization engine
-        torch.backends.quantized.engine = 'qnnpack'  # Use 'qnnpack' for ARM architectures
+    def train_autoencoder(self, epochs=1):
+        torch.backends.quantized.engine = 'qnnpack'
         try:
-            local_model = Autoencoder().to(device)
+            local_model = Autoencoder().to(ae_device)
             local_model.load_state_dict(self.global_model.state_dict())
             local_model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
             local_model = torch.quantization.prepare_qat(local_model, inplace=True)
 
-            # Set anomaly detection to identify where the backward pass fails
             torch.autograd.set_detect_anomaly(True)
 
             criterion = nn.MSELoss()
@@ -119,28 +130,13 @@ class SimpleSensorProtocol(IProtocol):
                 for i, data in progress_bar:
                     if self.finished:
                         break
-                    inputs = data[0].to(device)
-
-                    # if self.global_model_changed:
-                        # self.global_model_changed = False
-                        # dict = self.merge_dict(local_model.state_dict())
-                        # local_model = Autoencoder().to(device)
-                        # local_model.load_state_dict(dict)
-                        # local_model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
-                        # local_model = torch.quantization.prepare_qat(local_model, inplace=True)
+                    inputs = data[0].to(ae_device)
 
                     optimizer.zero_grad()
 
-                    # Forward pass
                     outputs = local_model(inputs)
-
-                    # Compute loss
                     loss = criterion(outputs, inputs)
-
-                    # Backward pass
                     loss.backward()
-
-                    # Update weights
                     optimizer.step()
 
                     running_loss += loss.item()
@@ -152,7 +148,6 @@ class SimpleSensorProtocol(IProtocol):
             if self.finished:
                 return
 
-            # Convert the model to a quantized version
             local_model.eval()
             local_model = torch.quantization.convert(local_model)
             self.current_state = local_model.state_dict()
@@ -161,32 +156,69 @@ class SimpleSensorProtocol(IProtocol):
         except Exception as e:
             logging.error(f"Error in client {self.id}", exc_info=True)
 
-    def merge_dict(self, client_dict, alpha=0.1):
-        global_dict = self.global_model.state_dict()
-        for k in global_dict.keys():
-            global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
-        return global_dict
+    def train_supervisioned(self, epochs=1):
+        torch.backends.quantized.engine = 'qnnpack'
+        try:
+            local_model = SupervisedModel().to(sup_device)
+            local_model.load_state_dict(self.global_model.state_dict())
+            local_model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
+            local_model = torch.quantization.prepare_qat(local_model, inplace=True)
+            torch.autograd.set_detect_anomaly(True)
+
+            criterion = nn.CrossEntropyLoss()
+            optimizer = optim.AdamW(local_model.parameters(), lr=0.001, weight_decay=1e-5)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10)
+
+            for epoch in range(epochs):
+                if self.finished:
+                    break
+                running_loss = 0.0
+                progress_bar = tqdm(enumerate(self.loader, 0), total=len(self.loader), desc=f'Client {self.id+1}, Epoch {epoch+1}', leave=False)
+                for i, data in progress_bar:
+                    if self.finished:
+                        break
+                    inputs, labels = data[0].to(sup_device), data[1].to(sup_device)
+
+                    optimizer.zero_grad()
+                    outputs = local_model(inputs)
+
+                    print(f'Inputs shape: {inputs.shape}, Outputs shape: {outputs.shape}, Labels shape: {labels.shape}')
+
+                    loss = criterion(outputs, labels)
+                    loss.backward()
+                    optimizer.step()
+
+                    running_loss += loss.item()
+                    progress_bar.set_postfix(loss=running_loss / (i + 1))
+                scheduler.step(running_loss / len(self.loader))
+
+            self.training_cycles += 1
+
+            if self.finished:
+                return
+
+            local_model.eval()
+            local_model = torch.quantization.convert(local_model)
+            self.current_state = local_model.state_dict()
+            self.model_updated = True
+
+        except Exception as e:
+            logging.error(f"Error in client {self.id}", exc_info=True)
 
     def handle_timer(self, timer: str) -> None:
         self._generate_packet()
 
     def serialize_state_dict(self, state_dict):
-        # Serialize the entire state_dict to a byte stream
         buffer = BytesIO()
         torch.save(state_dict, buffer)
         buffer.seek(0)
         
-        # Compress the byte stream
         compressed_buffer = BytesIO()
         with gzip.GzipFile(fileobj=compressed_buffer, mode='wb') as f:
             f.write(buffer.getvalue())
         
         compressed_data = compressed_buffer.getvalue()
-        
-        # Encode the compressed data to base64
         compressed_base64 = base64.b64encode(compressed_data).decode('utf-8')
-        
-        # Log the size of the compressed data
         logging.info(f"Serialized and compressed state_dict size: {len(compressed_data)} bytes")
         
         return json.dumps(compressed_base64)
@@ -195,7 +227,6 @@ class SimpleSensorProtocol(IProtocol):
         simple_message: SimpleMessage = json.loads(message)
 
         self._log.info(simple_message)
-        # self._log.info(f'sensor received from sender: {simple_message['sender_type']} and mode updated is {self.model_updated}')
         if simple_message['sender_type'] == SimpleSender.UAV.value and self.model_updated:
             print(f"\n\n [{self.id}] Local Model updated! \n\n")
             self.model_updated = False
@@ -213,7 +244,7 @@ class SimpleSensorProtocol(IProtocol):
 
             self.packet_count += 1
         if simple_message['type'] == 'model_update':
-            print(f"\n\n [{self.id}] Got model update from UVA! \n\n")
+            print(f"\n\n [{self.id}] Got model update from UAV! \n\n")
             state = decompress_and_deserialize_state_dict(simple_message['payload'])
             self.global_model.load_state_dict(state)
             self.global_model_changed = True
@@ -228,16 +259,9 @@ class SimpleSensorProtocol(IProtocol):
         self._log.info(f"Final packet count: {self.packet_count}")
 
 def decompress_and_deserialize_state_dict(serialized_state_dict):
-    # Decode the base64 to get compressed byte stream
     compressed_data = base64.b64decode(serialized_state_dict.encode('utf-8'))
-    
-    # Decompress the byte stream
     compressed_buffer = BytesIO(compressed_data)
     with gzip.GzipFile(fileobj=compressed_buffer, mode='rb') as f:
         buffer = BytesIO(f.read())
-    
     buffer.seek(0)
-    
-    # Deserialize the state_dict
     return torch.load(buffer)
-

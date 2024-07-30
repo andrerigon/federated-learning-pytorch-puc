@@ -1,81 +1,47 @@
 import torch
 import torchvision
 import torchvision.transforms as transforms
-import matplotlib.pyplot as plt
-import numpy as np
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Subset, DataLoader
-from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
+from sklearn.metrics import accuracy_score, confusion_matrix
 import logging
-import sys
-import multiprocessing as mp
+import torch.nn.functional as F
+import numpy as np
 import argparse
+import multiprocessing as mp
 
-# Set up logging to file and stdout
-logging.basicConfig(filename='stderr.log', level=logging.ERROR,
-                    format='%(asctime)s %(levelname)s %(message)s')
-console = logging.StreamHandler(sys.stdout)
-console.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-console.setFormatter(formatter)
-logging.getLogger('').addHandler(console)
-
-# Function to handle uncaught exceptions and log them
-def handle_exception(exc_type, exc_value, exc_traceback):
-    if issubclass(exc_type, KeyboardInterrupt):
-        sys.__excepthook__(exc_type, exc_value, exc_traceback)
-        return
-    logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
-
-sys.excepthook = handle_exception
-
-# Set up logging for warnings
-logging.captureWarnings(True)
-
-# Model save path
-PATH = './cifar_net.pth'
-
-# CIFAR-10 classes
-classes = ('plane', 'car', 'bird', 'cat',
-           'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
 
 # Device configuration
-device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Neural network model definition
-class Net(nn.Module):
+# Simple CNN model for supervised classification
+class SupervisedModel(nn.Module):
     def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(3, 45, 5)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(45, 66, 5)
-        self.fc1 = nn.Linear(66 * 5 * 5, 120)
-        self.fc2 = nn.Linear(120, 104)
-        self.fc3 = nn.Linear(104, 10)
+        super(SupervisedModel, self).__init__()
+        self.conv1 = nn.Conv2d(3, 32, 3, 1)
+        self.conv2 = nn.Conv2d(32, 64, 3, 1)
+        self.conv3 = nn.Conv2d(64, 128, 3, 1)
+        self.fc1 = nn.Linear(128 * 2 * 2, 256)
+        self.fc2 = nn.Linear(256, 10)
 
     def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = torch.flatten(x, 1)  # flatten all dimensions except batch
+        x = F.relu(self.conv1(x))
+        x = F.max_pool2d(F.relu(self.conv2(x)), 2)
+        x = F.max_pool2d(F.relu(self.conv3(x)), 2)
+        x = x.view(-1, 128 * 2 * 2)
         x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = self.fc2(x)
         return x
-
-# Function to display images
-def imshow(img):
-    img = img / 2 + 0.5  # unnormalize
-    npimg = img.numpy()
-    plt.imshow(np.transpose(npimg, (1, 2, 0)))
-    plt.show()
 
 # Function to download and transform CIFAR-10 dataset
 def download_dataset():
     transform = transforms.Compose(
-        [transforms.ToTensor(),
+        [transforms.RandomHorizontalFlip(),
+         transforms.RandomCrop(32, padding=4),
+         transforms.ToTensor(),
          transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
     trainset = torchvision.datasets.CIFAR10(root='./data', train=True,
@@ -94,7 +60,7 @@ def split_dataset(dataset, num_clients):
 # Function to train a local model on a client's data
 def train_local_model(client_id, client_loader, net, epochs, global_progress):
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
+    optimizer = optim.Adam(net.parameters(), lr=0.001)
 
     for epoch in range(epochs):
         running_loss = 0.0
@@ -124,7 +90,7 @@ def federated_averaging(global_model, client_models):
 # Function to train a client's model in parallel
 def train_client(client_id, client_loader, global_model_state_dict, results, epochs, global_progress):
     try:
-        local_model = Net().to(device)
+        local_model = SupervisedModel().to(device)
         local_model.load_state_dict(global_model_state_dict)
         train_local_model(client_id, client_loader, local_model, epochs, global_progress)
         results[client_id] = local_model.state_dict()
@@ -132,9 +98,9 @@ def train_client(client_id, client_loader, global_model_state_dict, results, epo
         logging.error(f"Error in client {client_id}", exc_info=True)
 
 # Function to orchestrate federated learning across all clients
-def train_federated(trainset, num_clients, epochs, path=PATH, max_workers=5, batch_size=4):
+def train_federated(trainset, num_clients, epochs, path='./cnn.pth', max_workers=5, batch_size=4):
     client_datasets = split_dataset(trainset, num_clients)
-    global_model = Net().to(device)
+    global_model = SupervisedModel().to(device)
 
     total_steps = num_clients * epochs
     with tqdm(total=total_steps, desc="Federated Learning Progress") as global_progress:
@@ -149,7 +115,7 @@ def train_federated(trainset, num_clients, epochs, path=PATH, max_workers=5, bat
                 for future in futures:
                     future.result()  # Wait for all threads to complete
 
-            client_models = [Net().to(device) for _ in range(num_clients)]
+            client_models = [SupervisedModel().to(device) for _ in range(num_clients)]
             for client_id, state_dict in enumerate(results):
                 client_models[client_id].load_state_dict(state_dict)
 
@@ -159,32 +125,46 @@ def train_federated(trainset, num_clients, epochs, path=PATH, max_workers=5, bat
     print('\nFinished Training\n')
 
 # Function to evaluate the global model on the test set
-def check(testloader, path=PATH):
-    net = Net().to(device)
+def check(testloader, path='./cnn.pth'):
+    net = SupervisedModel().to(device)
     net.load_state_dict(torch.load(path))
     
+    criterion = nn.CrossEntropyLoss()
+    total_loss = 0
     correct = 0
     total = 0
+    all_labels = []
+    all_predicted = []
+
     with tqdm(total=len(testloader), desc="Testing Progress") as progress_bar:
         with torch.no_grad():
             for data in testloader:
                 images, labels = data[0].to(device), data[1].to(device)
                 outputs = net(images)
+                loss = criterion(outputs, labels)
+                total_loss += loss.item()
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
+                all_labels.extend(labels.cpu().numpy())
+                all_predicted.extend(predicted.cpu().numpy())
                 progress_bar.update(1)
 
-    print(f'Accuracy of the network on the 10000 test images: {100 * correct // total} %')
+    accuracy = 100 * correct / total
+    mean_loss = total_loss / len(testloader)
+    cm = confusion_matrix(all_labels, all_predicted)
+    print(f'Mean Loss: {mean_loss}')
+    print(f'Accuracy: {accuracy}%')
+    print(f'Confusion Matrix:\n{cm}')
 
 # Main function to execute the federated learning workflow
 def main():
     # Set up argument parser
-    parser = argparse.ArgumentParser(description='Federated Learning with PyTorch on CIFAR-10')
+    parser = argparse.ArgumentParser(description='Federated Learning with Supervised Learning on CIFAR-10')
     parser.add_argument('--num_clients', type=int, default=10, help='Number of clients')
-    parser.add_argument('--epochs', type=int, default=20, help='Number of epochs')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
     parser.add_argument('--max_workers', type=int, default=10, help='Maximum number of workers')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for DataLoader')
+    parser.add_argument('--batch_size', type=int, default=4, help='Batch size for DataLoader')
 
     args = parser.parse_args()
 

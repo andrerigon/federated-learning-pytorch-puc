@@ -9,8 +9,9 @@ import argparse
 
 def main():
     # Set up argument parser
-    parser = argparse.ArgumentParser(description='Federated Learning with Autoencoders on CIFAR-10')
+    parser = argparse.ArgumentParser(description='Federated Learning Simulation')
     parser.add_argument('--duration', type=int, default=5000, help='Duration')
+    parser.add_argument('--mode', type=str, default='autoencoder', choices=['autoencoder', 'supervisioned'], help='Training mode')
 
     args = parser.parse_args()
 
@@ -18,9 +19,12 @@ def main():
     config = SimulationConfiguration(
         duration=args.duration,
         execution_logging=False
-        # duration=20000
     )
     builder = SimulationBuilder(config)
+
+    # Set the training mode for the protocols
+    SimpleUAVProtocol.training_mode = args.mode
+    SimpleSensorProtocol.training_mode = args.mode
 
     # Instantiating 4 sensors in fixed positions
     builder.add_node(SimpleSensorProtocol, (150, 0, 0))
@@ -28,14 +32,8 @@ def main():
     builder.add_node(SimpleSensorProtocol, (-150, 0, 0))
     builder.add_node(SimpleSensorProtocol, (0, -150, 0))
 
-    # Instantiating 4 UAVs at (0,0,0)
+    # Instantiating 1 UAV at (0,0,0)
     builder.add_node(SimpleUAVProtocol, (0, 0, 0))
-    # builder.add_node(SimpleUAVProtocol, (0, 0, 0))
-    # builder.add_node(SimpleUAVProtocol, (0, 0, 0))
-    # builder.add_node(SimpleUAVProtocol, (0, 0, 0))
-
-    # # Instantiating ground station at (0,0,0)
-    # builder.add_node(SimpleGroundStationProtocol, (0, 0, 0))
 
     # Adding required handlers
     builder.add_handler(TimerHandler())
@@ -56,4 +54,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
