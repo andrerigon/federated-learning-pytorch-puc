@@ -21,20 +21,35 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class SupervisedModel(nn.Module):
     def __init__(self):
         super(SupervisedModel, self).__init__()
-        self.conv1 = nn.Conv2d(3, 32, 3, 1)
-        self.conv2 = nn.Conv2d(32, 64, 3, 1)
-        self.conv3 = nn.Conv2d(64, 128, 3, 1)
-        self.fc1 = nn.Linear(128 * 2 * 2, 256)
-        self.fc2 = nn.Linear(256, 10)
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.fc_layers = nn.Sequential(
+            nn.Linear(128 * 4 * 4, 256),  # Assuming input images are 32x32
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, 10)  # CIFAR-10 has 10 classes
+        )
 
     def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.max_pool2d(F.relu(self.conv2(x)), 2)
-        x = F.max_pool2d(F.relu(self.conv3(x)), 2)
-        x = x.view(-1, 128 * 2 * 2)
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)  # Flatten the tensor
+        x = self.fc_layers(x)
         return x
+
 
 # Function to download and transform CIFAR-10 dataset
 def download_dataset():

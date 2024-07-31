@@ -4,7 +4,6 @@ import logging
 import random
 from typing import TypedDict
 import base64
-import json
 from io import BytesIO
 import gzip
 import torch.nn as nn
@@ -86,16 +85,12 @@ class SimpleSensorProtocol(IProtocol):
         if not os.path.exists(output_base_dir):
             return None
         
-        # Find the latest directory inside 'output'
         dirs = sorted([d for d in os.listdir(output_base_dir) if os.path.isdir(os.path.join(output_base_dir, d))], reverse=True)
         
-        # print(f"\n\n\n => {dirs}")
         for d in dirs:
             latest_mode_dir = os.path.join(output_base_dir, d, mode_dir)
-            # print(f"\n\n\n => {latest_mode_dir}")
             if os.path.exists(latest_mode_dir):
                 model_path = os.path.join(latest_mode_dir, 'model.pth')
-                # print(f"\n\n\n => {model_path} => {os.path.exists(model_path)}")
                 if os.path.exists(model_path):
                     return model_path
         
@@ -181,8 +176,6 @@ class SimpleSensorProtocol(IProtocol):
 
                     optimizer.zero_grad()
                     outputs = local_model(inputs)
-
-                    print(f'Inputs shape: {inputs.shape}, Outputs shape: {outputs.shape}, Labels shape: {labels.shape}')
 
                     loss = criterion(outputs, labels)
                     loss.backward()

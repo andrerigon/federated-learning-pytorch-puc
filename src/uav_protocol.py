@@ -35,41 +35,15 @@ def report_message(message: SimpleMessage) -> str:
     return ''
 
 mission_list = [
-    
-        (0, 0, 20),
-        (150, 0, 20)
-    ,
-    
-        (0, 0, 20),
-        (0, 150, 20)
-    ,
-    
-        (0, 0, 20),
-        (-150, 0, 20)
-    ,
-    
-        (0, 0, 20),
-        (0, -150, 20)
-    ,
-    
-        (0, 0, 20),
-        (150, 0, 20)
-    ,
-    
-        (0, 0, 20),
-        (0, 150, 20)
-    ,
-    
-        (0, 0, 20),
-        (-150, 0, 20)
-    ,
-    
-        (0, 0, 20),
-        (0, -150, 20)
-    
-
+    (0, 0, 20),
+    (150, 0, 20),
+    (0, 0, 20),
+    (0, 150, 20),
+    (0, 0, 20),
+    (-150, 0, 20),
+    (0, 0, 20),
+    (0, -150, 20)
 ]
-
 
 def decompress_and_deserialize_state_dict(serialized_state_dict):
     compressed_data = base64.b64decode(serialized_state_dict.encode('utf-8'))
@@ -125,8 +99,7 @@ class SimpleUAVProtocol(IProtocol):
     packet_count: int
     _mission: MissionMobilityPlugin
 
-    # Class variable for training mode
-    training_mode = 'autoencoder'    
+    training_mode = "autoencoder"
 
     def initialize(self) -> None:
         self._log = logging.getLogger()
@@ -145,48 +118,24 @@ class SimpleUAVProtocol(IProtocol):
             model = Autoencoder().to(ae_device)
         else:
             model = SupervisedModel().to(sup_device)
-
         if model_path:
             model.load_state_dict(torch.load(model_path))
             print(f"Model loaded from {model_path}")
         return model
 
-    # def get_last_model_path(self):
-    #     output_base_dir = 'output'
-    #     mode_dir = 'autoencoder' if SimpleUAVProtocol.training_mode == 'autoencoder' else 'supervisioned'
-    #     output_base_dir = os.path.join(output_base_dir, mode_dir)
-    #     print(f"{output_base_dir} {mode_dir} => {os.path.exists(output_base_dir)}")
-    #     if not os.path.exists(output_base_dir):
-    #         return None
-    #     dirs = sorted([d for d in os.listdir(output_base_dir) if os.path.isdir(os.path.join(output_base_dir, d))], reverse=True)
-    #     print(f"\n\n\n => {output_base_dir} {dirs}\n\n")
-    #     if not dirs:
-    #         return None
-    #     latest_dir = os.path.join(output_base_dir, dirs[0])
-    #     model_path = os.path.join(latest_dir, 'model.pth')
-    #     return model_path if os.path.exists(model_path) else None    
-    
     def get_last_model_path(self):
         output_base_dir = 'output'
-        mode_dir = SimpleUAVProtocol.training_mode 
-        
+        mode_dir = SimpleUAVProtocol.training_mode
         if not os.path.exists(output_base_dir):
             return None
-        
-        # Find the latest directory inside 'output'
         dirs = sorted([d for d in os.listdir(output_base_dir) if os.path.isdir(os.path.join(output_base_dir, d))], reverse=True)
-        
-        # print(f"\n\n\n => {dirs}")
         for d in dirs:
             latest_mode_dir = os.path.join(output_base_dir, d, mode_dir)
-            # print(f"\n\n\n => {latest_mode_dir}")
             if os.path.exists(latest_mode_dir):
                 model_path = os.path.join(latest_mode_dir, 'model.pth')
-                # print(f"\n\n\n => {model_path} => {os.path.exists(model_path)}")
                 if os.path.exists(model_path):
                     return model_path
-        
-        return None
+        return None 
 
     def serialize_state_dict(self, state_dict):
         buffer = BytesIO()
@@ -213,8 +162,13 @@ class SimpleUAVProtocol(IProtocol):
 
     def update_global_model_with_client(self, client_dict, alpha=0.1):
         global_dict = self.model.state_dict()
-        for k in global_dict.keys():
-            global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
+        if SimpleUAVProtocol.training_mode == 'autoencoder':
+            for k in global_dict.keys():
+                global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
+        else:
+            for k in global_dict.keys():
+                if k in client_dict:
+                    global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
         self.model.load_state_dict(global_dict)
         self.model.eval()
         self.model = torch.quantization.convert(self.model)
@@ -247,14 +201,11 @@ class SimpleUAVProtocol(IProtocol):
         testloader = DataLoader(testset, batch_size=4, shuffle=False, num_workers=2)
         output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'), SimpleUAVProtocol.training_mode)
         os.makedirs(output_dir, exist_ok=True)
-        self.check(testloader, output_dir)
-        self._log.info(f"Final packet count: {self.packet_count}")
-
-    def check(self, testloader, output_dir):
         if SimpleUAVProtocol.training_mode == 'autoencoder':
             self.check_autoencoder(testloader, output_dir)
         else:
             self.check_supervisioned(testloader, output_dir)
+        self._log.info(f"Final packet count: {self.packet_count}")
 
     def check_autoencoder(self, testloader, output_dir):
         criterion = nn.MSELoss()
@@ -303,15 +254,15 @@ class SimpleUAVProtocol(IProtocol):
                     correct += (predicted == labels).sum().item()
                     progress_bar.update(1)
 
-        accuracy = 100 * correct / total
         mean_loss = total_loss / len(testloader)
-        print(f'Mean Loss of the network on the test images: {mean_loss}')
+        accuracy = 100 * correct / total
+        print(f'Loss of the network on the test images: {mean_loss}')
         print(f'Accuracy of the network on the test images: {accuracy}%')
 
         torch.save(self.model.state_dict(), os.path.join(output_dir, 'model.pth'))
         with open(os.path.join(output_dir, 'stats.txt'), 'w') as f:
-            f.write(f'Mean Loss: {mean_loss}\n')
-            f.write(f'Accuracy: {accuracy}%\n')
+            f.write(f'Loss: {mean_loss}\n')
+            f.write(f'Accuracy: {accuracy * 100}\n')
             f.write(f'Model Updates: {self.model_updates}\n')
             f.write(f'Training Cycles: {self.training_cycles}\n')
 
