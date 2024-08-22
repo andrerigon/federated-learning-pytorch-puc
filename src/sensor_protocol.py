@@ -69,7 +69,7 @@ class SimpleSensorProtocol(IProtocol):
     def load_model(self):
         model_path = self.get_last_model_path()
         if SimpleSensorProtocol.training_mode == 'autoencoder':
-            model = Autoencoder(num_classes=10)  # Ensure num_classes matches across UAV and sensor
+            model = Autoencoder(num_classes=10).to(ae_device)
         else:
             model = SupervisedModel().to(sup_device)
 
@@ -77,6 +77,7 @@ class SimpleSensorProtocol(IProtocol):
             model.load_state_dict(torch.load(model_path))
             print(f"Model loaded from {model_path}")
         return model
+
 
     def get_last_model_path(self):
         output_base_dir = 'output'
@@ -152,7 +153,7 @@ class SimpleSensorProtocol(IProtocol):
                 return
 
             local_model.eval()
-            local_model = torch.quantization.convert(local_model)
+            local_model = torch.quantization.convert(local_model, mapping={'classifier': torch.nn.Identity})
             self.current_state = local_model.state_dict()
             self.model_updated = True
 

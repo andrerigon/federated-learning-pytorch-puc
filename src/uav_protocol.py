@@ -118,10 +118,12 @@ class SimpleUAVProtocol(IProtocol):
             model = Autoencoder(num_classes=10).to(ae_device)
         else:
             model = SupervisedModel().to(sup_device)
+
         if model_path:
             model.load_state_dict(torch.load(model_path))
             print(f"Model loaded from {model_path}")
         return model
+
 
     def get_last_model_path(self):
         output_base_dir = 'output'
@@ -141,13 +143,16 @@ class SimpleUAVProtocol(IProtocol):
         buffer = BytesIO()
         torch.save(state_dict, buffer)
         buffer.seek(0)
+        
         compressed_buffer = BytesIO()
         with gzip.GzipFile(fileobj=compressed_buffer, mode='wb') as f:
             f.write(buffer.getvalue())
+        
         compressed_data = compressed_buffer.getvalue()
         compressed_base64 = base64.b64encode(compressed_data).decode('utf-8')
         logging.info(f"Serialized and compressed state_dict size: {len(compressed_data)} bytes")
-        return json.dumps(compressed_base64)    
+        
+        return json.dumps(compressed_base64)   
 
     def _send_heartbeat(self) -> None:
         message: SimpleMessage = {

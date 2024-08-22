@@ -8,3 +8,5 @@ flwr-poc
 *.pth
 *.pth_bck
 stderr.log
+before_mixed_training
+output.old
