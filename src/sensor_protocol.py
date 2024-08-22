@@ -69,7 +69,7 @@ class SimpleSensorProtocol(IProtocol):
     def load_model(self):
         model_path = self.get_last_model_path()
         if SimpleSensorProtocol.training_mode == 'autoencoder':
-            model = Autoencoder().to(ae_device)
+            model = Autoencoder(num_classes=10)  # Ensure num_classes matches across UAV and sensor
         else:
             model = SupervisedModel().to(sup_device)
 
@@ -106,37 +106,45 @@ class SimpleSensorProtocol(IProtocol):
     def train_autoencoder(self, epochs=1):
         torch.backends.quantized.engine = 'qnnpack'
         try:
-            local_model = Autoencoder().to(ae_device)
+            local_model = Autoencoder(num_classes=10).to(ae_device)  # Ensure num_classes matches
             local_model.load_state_dict(self.global_model.state_dict())
             local_model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
             local_model = torch.quantization.prepare_qat(local_model, inplace=True)
 
             torch.autograd.set_detect_anomaly(True)
 
-            criterion = nn.MSELoss()
+            criterion_reconstruction = nn.MSELoss()
+            criterion_classification = nn.CrossEntropyLoss()
             optimizer = optim.AdamW(local_model.parameters(), lr=0.001, weight_decay=1e-5)
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10)
 
             for epoch in range(epochs):
                 if self.finished:
                     break
-                running_loss = 0.0
+                running_reconstruction_loss = 0.0
+                running_classification_loss = 0.0
                 progress_bar = tqdm(enumerate(self.loader, 0), total=len(self.loader), desc=f'Client {self.id+1}, Epoch {epoch+1}', leave=False)
                 for i, data in progress_bar:
                     if self.finished:
                         break
-                    inputs = data[0].to(ae_device)
+                    inputs, labels = data[0].to(ae_device), data[1].to(ae_device)
 
                     optimizer.zero_grad()
 
-                    outputs = local_model(inputs)
-                    loss = criterion(outputs, inputs)
+                    decoded, classified = local_model(inputs)
+
+                    reconstruction_loss = criterion_reconstruction(decoded, inputs)
+                    classification_loss = criterion_classification(classified, labels)
+
+                    loss = reconstruction_loss + classification_loss
                     loss.backward()
                     optimizer.step()
 
-                    running_loss += loss.item()
-                    progress_bar.set_postfix(loss=running_loss / (i + 1))
-                scheduler.step(running_loss / len(self.loader))
+                    running_reconstruction_loss += reconstruction_loss.item()
+                    running_classification_loss += classification_loss.item()
+                    progress_bar.set_postfix(reconstruction_loss=running_reconstruction_loss / (i + 1),
+                                            classification_loss=running_classification_loss / (i + 1))
+                scheduler.step(running_reconstruction_loss / len(self.loader))
 
             self.training_cycles += 1
 
@@ -150,6 +158,7 @@ class SimpleSensorProtocol(IProtocol):
 
         except Exception as e:
             logging.error(f"Error in client {self.id}", exc_info=True)
+
 
     def train_supervisioned(self, epochs=1):
         torch.backends.quantized.engine = 'qnnpack'

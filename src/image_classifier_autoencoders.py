@@ -45,7 +45,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Simplified Autoencoder model definition
 class Autoencoder(nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes=10):
         super(Autoencoder, self).__init__()
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 32, 3, stride=2, padding=1),
@@ -62,11 +62,19 @@ class Autoencoder(nn.Module):
             nn.ConvTranspose2d(32, 3, 3, stride=2, padding=1, output_padding=1),
             nn.Sigmoid()
         )
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * 8 * 8, 128),  # Assuming input image size is 32x32
+            nn.ReLU(True),
+            nn.Linear(128, num_classes)
+        )
 
     def forward(self, x):
         x = self.encoder(x)
-        x = self.decoder(x)
-        return x
+        decoded = self.decoder(x)
+        classified = self.classifier(x)
+        return decoded, classified
 
 # Function to display images
 def imshow(img):

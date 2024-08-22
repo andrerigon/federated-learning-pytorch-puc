@@ -115,7 +115,7 @@ class SimpleUAVProtocol(IProtocol):
     def load_model(self):
         model_path = self.get_last_model_path()
         if SimpleUAVProtocol.training_mode == 'autoencoder':
-            model = Autoencoder().to(ae_device)
+            model = Autoencoder(num_classes=10).to(ae_device)
         else:
             model = SupervisedModel().to(sup_device)
         if model_path:
@@ -162,16 +162,32 @@ class SimpleUAVProtocol(IProtocol):
 
     def update_global_model_with_client(self, client_dict, alpha=0.1):
         global_dict = self.model.state_dict()
+
         if SimpleUAVProtocol.training_mode == 'autoencoder':
-            for k in global_dict.keys():
-                global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
-        else:
+            # Aggregating for Autoencoder
             for k in global_dict.keys():
                 if k in client_dict:
-                    global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
+                    if global_dict[k].size() == client_dict[k].size():  # Ensure sizes match
+                        global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
+                    else:
+                        self._log.warning(f"Size mismatch for key {k} in Autoencoder mode. Skipping aggregation for this key.")
+                else:
+                    self._log.warning(f"Key {k} not found in client model for Autoencoder mode. Skipping aggregation for this key.")
+        else:
+            # Aggregating for Supervisioned Model
+            for k in global_dict.keys():
+                if k in client_dict:
+                    if global_dict[k].size() == client_dict[k].size():  # Ensure sizes match
+                        global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
+                    else:
+                        self._log.warning(f"Size mismatch for key {k} in Supervisioned mode. Skipping aggregation for this key.")
+                else:
+                    self._log.warning(f"Key {k} not found in client model for Supervisioned mode. Skipping aggregation for this key.")
+        
         self.model.load_state_dict(global_dict)
         self.model.eval()
         self.model = torch.quantization.convert(self.model)
+
 
     def handle_timer(self, timer: str) -> None:
         self._send_heartbeat()
@@ -208,40 +224,67 @@ class SimpleUAVProtocol(IProtocol):
         self._log.info(f"Final packet count: {self.packet_count}")
 
     def check_autoencoder(self, testloader, output_dir):
-        criterion = nn.MSELoss()
-        total_loss = 0
+        criterion_reconstruction = nn.MSELoss()
+        criterion_classification = nn.CrossEntropyLoss()
+        total_reconstruction_loss = 0
+        total_classification_loss = 0
         mse_values = []
+        all_labels = []
+        all_predictions = []
+
         with tqdm(total=len(testloader), desc="Testing Progress") as progress_bar:
             with torch.no_grad():
                 for data in testloader:
-                    images = data[0].to(ae_device)
-                    outputs = self.model(images)
-                    loss = criterion(outputs, images)
-                    total_loss += loss.item()
-                    mse_values.append(loss.item())
+                    images, labels = data[0].to(ae_device), data[1].to(ae_device)
+                    decoded, classified = self.model(images)
+                    
+                    reconstruction_loss = criterion_reconstruction(decoded, images)
+                    classification_loss = criterion_classification(classified, labels)
+                    total_reconstruction_loss += reconstruction_loss.item()
+                    total_classification_loss += classification_loss.item()
+
+                    mse_values.append(reconstruction_loss.item())
+                    _, predicted = torch.max(classified.data, 1)
+                    all_labels.extend(labels.cpu().numpy())
+                    all_predictions.extend(predicted.cpu().numpy())
+
                     progress_bar.update(1)
 
-        mean_mse = total_loss / len(testloader)
-        print(f'Mean Squared Error of the network on the test images: {mean_mse}')
-        plot_mse(mse_values, output_dir)
+        mean_reconstruction_loss = total_reconstruction_loss / len(testloader)
+        mean_classification_loss = total_classification_loss / len(testloader)
+        accuracy = 100 * accuracy_score(all_labels, all_predictions)
+        features, _ = extract_features(testloader, self.model, "autoencoder")
+        clustering_accuracy, ari = evaluate_clustering(features, all_labels, output_dir)
 
-        features, labels = extract_features(testloader, self.model)
-        accuracy, ari = evaluate_clustering(features, labels, output_dir)
-        plot_clustering_metrics(accuracy, ari, output_dir)
+        print(f'Mean Squared Error of the network on the test images: {mean_reconstruction_loss}')
+        print(f'Classification Loss: {mean_classification_loss}')
+        print(f'Accuracy of the network on the test images: {accuracy}%')
+        print(f'Clustering Accuracy: {clustering_accuracy}')
+        print(f'Adjusted Rand Index: {ari}')
 
+        # Save the metrics and plots
         torch.save(self.model.state_dict(), os.path.join(output_dir, 'model.pth'))
         with open(os.path.join(output_dir, 'stats.txt'), 'w') as f:
-            f.write(f'Mean Squared Error: {mean_mse}\n')
-            f.write(f'Clustering Accuracy: {accuracy}\n')
+            f.write(f'Mean Reconstruction Loss: {mean_reconstruction_loss}\n')
+            f.write(f'Classification Loss: {mean_classification_loss}\n')
+            f.write(f'Accuracy: {accuracy}\n')
+            f.write(f'Clustering Accuracy: {clustering_accuracy}\n')
             f.write(f'Adjusted Rand Index: {ari}\n')
             f.write(f'Model Updates: {self.model_updates}\n')
             f.write(f'Training Cycles: {self.training_cycles}\n')
+
+        # Plot the metrics
+        plot_mse(mse_values, output_dir)
+        plot_clustering_metrics(clustering_accuracy, ari, output_dir)
 
     def check_supervisioned(self, testloader, output_dir):
         criterion = nn.CrossEntropyLoss()
         total_loss = 0
         correct = 0
         total = 0
+        all_labels = []
+        all_predictions = []
+        
         with tqdm(total=len(testloader), desc="Testing Progress") as progress_bar:
             with torch.no_grad():
                 for data in testloader:
@@ -252,47 +295,77 @@ class SimpleUAVProtocol(IProtocol):
                     _, predicted = torch.max(outputs.data, 1)
                     total += labels.size(0)
                     correct += (predicted == labels).sum().item()
+                    all_labels.extend(labels.cpu().numpy())
+                    all_predictions.extend(predicted.cpu().numpy())
                     progress_bar.update(1)
 
         mean_loss = total_loss / len(testloader)
         accuracy = 100 * correct / total
+        features, _ = extract_features(testloader, self.model, "supervisioned")
+        clustering_accuracy, ari = evaluate_clustering(features, all_labels, output_dir)
+
         print(f'Loss of the network on the test images: {mean_loss}')
         print(f'Accuracy of the network on the test images: {accuracy}%')
+        print(f'Clustering Accuracy: {clustering_accuracy}')
+        print(f'Adjusted Rand Index: {ari}')
 
+        # Save the metrics and plots
         torch.save(self.model.state_dict(), os.path.join(output_dir, 'model.pth'))
         with open(os.path.join(output_dir, 'stats.txt'), 'w') as f:
             f.write(f'Loss: {mean_loss}\n')
-            f.write(f'Accuracy: {accuracy * 100}\n')
+            f.write(f'Accuracy: {accuracy}\n')
+            f.write(f'Clustering Accuracy: {clustering_accuracy}\n')
+            f.write(f'Adjusted Rand Index: {ari}\n')
             f.write(f'Model Updates: {self.model_updates}\n')
             f.write(f'Training Cycles: {self.training_cycles}\n')
 
-def extract_features(dataloader, model):
+        # Plot the metrics
+        plot_mse([mean_loss], output_dir)  # Plotting classification loss as MSE for visualization
+        plot_clustering_metrics(clustering_accuracy, ari, output_dir)
+
+def extract_features(dataloader, model, training_mode):
     model.eval()
     features = []
     labels = []
     with torch.no_grad():
         for data in dataloader:
             images, targets = data[0].to(ae_device), data[1]
-            encoded = model.encoder(images)
-            features.append(encoded.view(encoded.size(0), -1).cpu().numpy())
+
+            if training_mode == 'autoencoder':
+                encoded, _ = model(images)  # Autoencoder returns two outputs
+                features.append(encoded.view(encoded.size(0), -1).cpu().numpy())
+            else:  # Supervised model case
+                outputs = model(images)  # Supervised model returns one output
+                features.append(outputs.view(outputs.size(0), -1).cpu().numpy())
+
             labels.append(targets.cpu().numpy())
+
     return np.concatenate(features), np.concatenate(labels)
 
 def evaluate_clustering(features, labels, output_dir, n_clusters=10):
     n_clusters = min(n_clusters, len(features))
     kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(features)
     predicted_labels = kmeans.labels_
+
+    # Ensure labels is a NumPy array
+    labels = np.array(labels)
+
     label_mapping = {}
     for cluster in range(n_clusters):
-        cluster_indices = np.where(predicted_labels == cluster)[0]
-        true_labels = labels[cluster_indices]
-        most_common_label = np.bincount(true_labels).argmax()
+        cluster_indices = np.where(predicted_labels == cluster)[0]  # Get the indices of data points in this cluster
+        if len(cluster_indices) == 0:  # Check if there are any points in this cluster
+            continue
+        true_labels = labels[cluster_indices]  # Select labels for these indices
+        most_common_label = np.bincount(true_labels).argmax()  # Get the most common true label in this cluster
         label_mapping[cluster] = most_common_label
+
     mapped_predicted_labels = np.vectorize(label_mapping.get)(predicted_labels)
     accuracy = accuracy_score(labels, mapped_predicted_labels)
     ari = adjusted_rand_score(labels, mapped_predicted_labels)
     print(f'Clustering Accuracy: {accuracy}')
     print(f'Adjusted Rand Index: {ari}')
+
+    # Plotting confusion matrix and t-SNE visualization
     plot_confusion_matrix(labels, mapped_predicted_labels, classes=range(10), output_dir=output_dir)
     plot_tsne(features, labels, output_dir)
     return accuracy, ari
