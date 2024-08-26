@@ -201,7 +201,7 @@ class SimpleSensorProtocol(IProtocol):
                 return
 
             local_model.eval()
-            local_model = torch.quantization.convert(local_model)
+            local_model = torch.quantization.convert(local_model, mapping={'fc_layers': torch.nn.Identity})
             self.current_state = local_model.state_dict()
             self.model_updated = True
 
