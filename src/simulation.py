@@ -12,11 +12,18 @@ def main():
     parser = argparse.ArgumentParser(description='Federated Learning with Autoencoders on CIFAR-10')
     parser.add_argument('--duration', type=int, default=5000, help='Duration')
     parser.add_argument('--mode', type=str, default='autoencoder', choices=['autoencoder', 'supervisioned'], help='Training mode')
+    parser.add_argument('--from_scratch', type=bool, default=False, help='Start training from scratch without loading a pre-trained model')
+    parser.add_argument('--success_rate', type=float, default=1.0, help='Communication success rate (0.0 to 1.0)')
 
     args = parser.parse_args()
 
+    print(f"Args: {args}")
+
     SimpleUAVProtocol.training_mode = args.mode
+    SimpleUAVProtocol.from_scratch = args.from_scratch
     SimpleSensorProtocol.training_mode = args.mode
+    SimpleSensorProtocol.from_scratch = args.from_scratch
+    SimpleSensorProtocol.success_rate = args.success_rate
 
     config = SimulationConfiguration(
         duration=args.duration,
@@ -24,6 +31,7 @@ def main():
     )
     builder = SimulationBuilder(config)
 
+    # Passing the communication success rate to the sensors
     builder.add_node(SimpleSensorProtocol, (150, 0, 0))
     builder.add_node(SimpleSensorProtocol, (0, 150, 0))
     builder.add_node(SimpleSensorProtocol, (-150, 0, 0))
@@ -48,3 +56,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+self.provider.tracked_variables['blabla'] = 'oi'

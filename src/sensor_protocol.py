@@ -35,9 +35,29 @@ class SimpleMessage(TypedDict):
     type: str
     training_cycles: int
     model_updates: int
+    success_rate: float
 
 def report_message(message: SimpleMessage) -> str:
     return ''
+
+class CommunicationMediator:
+    def __init__(self, success_rate: float):
+        self.success_rate = success_rate
+        self.total_attempts = 0
+        self.successful_attempts = 0
+
+    def send_message(self, command: SendMessageCommand, provider):
+        self.total_attempts += 1
+        if random.random() < self.success_rate:
+            self.successful_attempts += 1
+            provider.send_communication_command(command)
+        else:
+            logging.info("Message failed to send due to simulated communication error.")
+
+    def log_metrics(self):
+        success_rate = self.successful_attempts / self.total_attempts if self.total_attempts > 0 else 0
+        print(f"Message success rate: {success_rate:.2%}")
+        print(f"Total attempts: {self.total_attempts}, Successful attempts: {self.successful_attempts}")
 
 class SimpleSensorProtocol(IProtocol):
     _log: logging.Logger
@@ -45,6 +65,8 @@ class SimpleSensorProtocol(IProtocol):
     remaining_energy: int
 
     training_mode = "autoencoder"
+    from_scratch = False
+    success_rate = 1.0
 
     def initialize(self) -> None:
         self.remaining_energy = random.randint(1, 5)
@@ -61,6 +83,9 @@ class SimpleSensorProtocol(IProtocol):
         self.training_cycles = 0
         self.model_updates = 0
 
+        # Communication Mediator with configurable success rate
+        self.communicator = CommunicationMediator(success_rate = SimpleSensorProtocol.success_rate)
+
         self.thread = threading.Thread(target=self.start_training)
         self.finished = False
         self.model_updated = False
@@ -73,7 +98,7 @@ class SimpleSensorProtocol(IProtocol):
         else:
             model = SupervisedModel().to(sup_device)
 
-        if model_path:
+        if model_path and not SimpleSensorProtocol.from_scratch:
             model.load_state_dict(torch.load(model_path))
             print(f"Model loaded from {model_path}")
         return model
@@ -153,6 +178,8 @@ class SimpleSensorProtocol(IProtocol):
                 return
 
             local_model.eval()
+            # Log model sizes
+            self.log_model_sizes(local_model)
             local_model = torch.quantization.convert(local_model, mapping={'classifier': torch.nn.Identity})
             self.current_state = local_model.state_dict()
             self.model_updated = True
@@ -205,9 +232,23 @@ class SimpleSensorProtocol(IProtocol):
             self.current_state = local_model.state_dict()
             self.model_updated = True
 
+            # Log model sizes
+            self.log_model_sizes(local_model)
+
         except Exception as e:
             logging.error(f"Error in client {self.id}", exc_info=True)
 
+    def log_model_sizes(self, model):
+        non_quantized_size = self.get_model_size(model)
+        quantized_size = self.get_model_size(torch.quantization.convert(model))
+        print(f"Non-quantized model size: {non_quantized_size} bytes")
+        print(f"Quantized model size: {quantized_size} bytes")
+
+    def get_model_size(self, model):
+        buffer = BytesIO()
+        torch.save(model.state_dict(), buffer)
+        return len(buffer.getvalue())
+    
     def handle_timer(self, timer: str) -> None:
         self._generate_packet()
 
@@ -222,7 +263,7 @@ class SimpleSensorProtocol(IProtocol):
         
         compressed_data = compressed_buffer.getvalue()
         compressed_base64 = base64.b64encode(compressed_data).decode('utf-8')
-        logging.info(f"Serialized and compressed state_dict size: {len(compressed_data)} bytes")
+        print(f"Serialized and compressed state_dict size: {len(compressed_data)} bytes")
         
         return json.dumps(compressed_base64)
 
@@ -239,11 +280,12 @@ class SimpleSensorProtocol(IProtocol):
                 'packet_count': self.packet_count,
                 'type': 'model_update',
                 'training_cycles': self.training_cycles,
-                'model_updates': self.model_updates
+                'model_updates': self.model_updates,
+                'success_rate': self.communicator.successful_attempts / self.communicator.total_attempts if self.communicator.total_attempts > 0 else 0
             }
 
             command = SendMessageCommand(json.dumps(response), simple_message['sender'])
-            self.provider.send_communication_command(command)
+            self.communicator.send_message(command, self.provider)
 
             self.packet_count += 1
         if simple_message['type'] == 'model_update':
@@ -258,8 +300,8 @@ class SimpleSensorProtocol(IProtocol):
 
     def finish(self) -> None:
         self.finished = True
-        logging.info(f"Meg meg!")
         self._log.info(f"Final packet count: {self.packet_count}")
+        self.communicator.log_metrics()
 
 def decompress_and_deserialize_state_dict(serialized_state_dict):
     compressed_data = base64.b64decode(serialized_state_dict.encode('utf-8'))

@@ -100,8 +100,9 @@ class SimpleUAVProtocol(IProtocol):
     _mission: MissionMobilityPlugin
 
     training_mode = "autoencoder"
+    from_scratch = False
 
-    def initialize(self) -> None:
+    def initialize(self, ) -> None:
         self._log = logging.getLogger()
         self.packet_count = 0
         self.id = self.provider.get_id()
@@ -111,6 +112,7 @@ class SimpleUAVProtocol(IProtocol):
         self._send_heartbeat()
         self.training_cycles = {}
         self.model_updates = {}
+        self.success_rates = {}
 
     def load_model(self):
         model_path = self.get_last_model_path()
@@ -119,7 +121,7 @@ class SimpleUAVProtocol(IProtocol):
         else:
             model = SupervisedModel().to(sup_device)
 
-        if model_path:
+        if model_path and not SimpleUAVProtocol.from_scratch:
             model.load_state_dict(torch.load(model_path))
             print(f"Model loaded from {model_path}")
         return model
@@ -201,6 +203,7 @@ class SimpleUAVProtocol(IProtocol):
         message: SimpleMessage = json.loads(message)
         self.training_cycles[message['sender']] = message['training_cycles']
         self.model_updates[message['sender']] = message['model_updates']
+        self.success_rates[message['sender']] = message.get('success_rate', 0)
         decompressed_state_dict = decompress_and_deserialize_state_dict(message['payload'])
         self.update_global_model_with_client(decompressed_state_dict)
         self._log.info(f'Sending model update')
@@ -277,6 +280,7 @@ class SimpleUAVProtocol(IProtocol):
             f.write(f'Adjusted Rand Index: {ari}\n')
             f.write(f'Model Updates: {self.model_updates}\n')
             f.write(f'Training Cycles: {self.training_cycles}\n')
+            f.write(f'Success Rates: {self.success_rates}\n')
 
         # Plot the metrics
         plot_mse(mse_values, output_dir)
@@ -323,6 +327,7 @@ class SimpleUAVProtocol(IProtocol):
             f.write(f'Adjusted Rand Index: {ari}\n')
             f.write(f'Model Updates: {self.model_updates}\n')
             f.write(f'Training Cycles: {self.training_cycles}\n')
+            f.write(f'Success Rates: {self.success_rates}\n')
 
         # Plot the metrics
         plot_mse([mean_loss], output_dir)  # Plotting classification loss as MSE for visualization
