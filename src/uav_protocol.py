@@ -99,11 +99,13 @@ class SimpleUAVProtocol(IProtocol):
     packet_count: int
     _mission: MissionMobilityPlugin
 
-    training_mode = "autoencoder"
-    from_scratch = False
-
-    def initialize(self, ) -> None:
+    def __init__(self, training_mode = "autoencoder", from_scratch = False):
+        self.training_mode = training_mode
+        self.from_scratch = from_scratch
+    
+    def initialize(self) -> None:
         self._log = logging.getLogger()
+        
         self.packet_count = 0
         self.id = self.provider.get_id()
         self._mission = MissionMobilityPlugin(self, MissionMobilityConfiguration(loop_mission=LoopMission.REVERSE))
@@ -116,12 +118,12 @@ class SimpleUAVProtocol(IProtocol):
 
     def load_model(self):
         model_path = self.get_last_model_path()
-        if SimpleUAVProtocol.training_mode == 'autoencoder':
+        if self.training_mode == 'autoencoder':
             model = Autoencoder(num_classes=10).to(ae_device)
         else:
             model = SupervisedModel().to(sup_device)
 
-        if model_path and not SimpleUAVProtocol.from_scratch:
+        if model_path and not self.from_scratch:
             model.load_state_dict(torch.load(model_path))
             print(f"Model loaded from {model_path}")
         return model
@@ -129,7 +131,7 @@ class SimpleUAVProtocol(IProtocol):
 
     def get_last_model_path(self):
         output_base_dir = 'output'
-        mode_dir = SimpleUAVProtocol.training_mode
+        mode_dir = self.training_mode
         if not os.path.exists(output_base_dir):
             return None
         dirs = sorted([d for d in os.listdir(output_base_dir) if os.path.isdir(os.path.join(output_base_dir, d))], reverse=True)
@@ -170,7 +172,7 @@ class SimpleUAVProtocol(IProtocol):
     def update_global_model_with_client(self, client_dict, alpha=0.1):
         global_dict = self.model.state_dict()
 
-        if SimpleUAVProtocol.training_mode == 'autoencoder':
+        if self.training_mode == 'autoencoder':
             # Aggregating for Autoencoder
             for k in global_dict.keys():
                 if k in client_dict:
@@ -223,9 +225,9 @@ class SimpleUAVProtocol(IProtocol):
     def finish(self) -> None:
         _, testset = download_dataset()
         testloader = DataLoader(testset, batch_size=4, shuffle=False, num_workers=2)
-        output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'), SimpleUAVProtocol.training_mode)
+        output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'), self.training_mode)
         os.makedirs(output_dir, exist_ok=True)
-        if SimpleUAVProtocol.training_mode == 'autoencoder':
+        if self.training_mode == 'autoencoder':
             self.check_autoencoder(testloader, output_dir)
         else:
             self.check_supervisioned(testloader, output_dir)

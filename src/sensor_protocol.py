@@ -64,9 +64,10 @@ class SimpleSensorProtocol(IProtocol):
     packet_count: int
     remaining_energy: int
 
-    training_mode = "autoencoder"
-    from_scratch = False
-    success_rate = 1.0
+    def __init__(self, training_mode = "autoencoder", from_scratch = False, success_rate = 1.0):
+        self.training_mode = training_mode
+        self.from_scratch = from_scratch
+        self.success_rate = success_rate
 
     def initialize(self) -> None:
         self.remaining_energy = random.randint(1, 5)
@@ -84,7 +85,7 @@ class SimpleSensorProtocol(IProtocol):
         self.model_updates = 0
 
         # Communication Mediator with configurable success rate
-        self.communicator = CommunicationMediator(success_rate = SimpleSensorProtocol.success_rate)
+        self.communicator = CommunicationMediator(success_rate = self.success_rate)
 
         self.thread = threading.Thread(target=self.start_training)
         self.finished = False
@@ -93,12 +94,12 @@ class SimpleSensorProtocol(IProtocol):
 
     def load_model(self):
         model_path = self.get_last_model_path()
-        if SimpleSensorProtocol.training_mode == 'autoencoder':
+        if self.training_mode == 'autoencoder':
             model = Autoencoder(num_classes=10).to(ae_device)
         else:
             model = SupervisedModel().to(sup_device)
 
-        if model_path and not SimpleSensorProtocol.from_scratch:
+        if model_path and not self.from_scratch:
             model.load_state_dict(torch.load(model_path))
             print(f"Model loaded from {model_path}")
         return model
@@ -106,7 +107,7 @@ class SimpleSensorProtocol(IProtocol):
 
     def get_last_model_path(self):
         output_base_dir = 'output'
-        mode_dir = SimpleSensorProtocol.training_mode 
+        mode_dir = self.training_mode 
         
         if not os.path.exists(output_base_dir):
             return None
@@ -124,7 +125,7 @@ class SimpleSensorProtocol(IProtocol):
 
     def start_training(self):
         while not self.finished:
-            if SimpleSensorProtocol.training_mode == 'autoencoder':
+            if self.training_mode == 'autoencoder':
                 self.train_autoencoder()
             else:
                 self.train_supervisioned()
