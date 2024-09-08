@@ -2,6 +2,8 @@ import enum
 import json
 import logging
 import random
+import threading
+import queue
 from typing import TypedDict
 from collections import OrderedDict
 import base64
@@ -33,17 +35,6 @@ from sensor_protocol import SimpleMessage, SimpleSender
 
 def report_message(message: SimpleMessage) -> str:
     return ''
-
-mission_list = [
-    (0, 0, 20),
-    (150, 0, 20),
-    (0, 0, 20),
-    (0, 150, 20),
-    (0, 0, 20),
-    (-150, 0, 20),
-    (0, 0, 20),
-    (0, -150, 20)
-]
 
 def decompress_and_deserialize_state_dict(serialized_state_dict):
     compressed_data = base64.b64decode(serialized_state_dict.encode('utf-8'))
@@ -99,22 +90,51 @@ class SimpleUAVProtocol(IProtocol):
     packet_count: int
     _mission: MissionMobilityPlugin
 
-    def __init__(self, training_mode = "autoencoder", from_scratch = False):
+    def __init__(self, training_mode="autoencoder", from_scratch=False, mission_list=[(0, 0, 20),
+                                                                                     (150, 0, 20),
+                                                                                     (0, 0, 20),
+                                                                                     (0, 150, 20),
+                                                                                     (0, 0, 20),
+                                                                                     (-150, 0, 20),
+                                                                                     (0, 0, 20),
+                                                                                     (0, -150, 20)]):
+        self.mission_list = mission_list  # Mission list passed to each UAV
         self.training_mode = training_mode
         self.from_scratch = from_scratch
-    
+        
+        # Debounce dictionary to track the last time a message was processed from each sender
+        self.last_received_time = {}
+        self.debounce_interval = 5  # 5 seconds debounce interval
+
+        # Queue for incoming messages
+        self.message_queue = queue.Queue()
+        self.message_processing_thread = threading.Thread(target=self.process_messages)
+        self.message_processing_thread.daemon = True  # Ensure thread exits when the main program does
+        self.message_processing_thread.start()
+
     def initialize(self) -> None:
         self._log = logging.getLogger()
-        
+
         self.packet_count = 0
         self.id = self.provider.get_id()
-        self._mission = MissionMobilityPlugin(self, MissionMobilityConfiguration(loop_mission=LoopMission.REVERSE))
-        self._mission.start_mission(mission_list)
+        print(f"Starting uva [{self.id}]")
+
+        # Initialize the MissionMobilityPlugin with the mission list for this UAV
+        mission_config = MissionMobilityConfiguration(loop_mission=LoopMission.REVERSE)
+        self._mission = MissionMobilityPlugin(self, mission_config)
+        print(f"Mission list: {self.mission_list}")
+        self._mission.start_mission(self.mission_list)  # Start the mission with the provided list
+
         self.model = self.load_model()
         self._send_heartbeat()
+
         self.training_cycles = {}
         self.model_updates = {}
         self.success_rates = {}
+
+        # Initialize additional tracking attributes
+        self.last_update_time = 0
+        self.model_update_count = 0
 
     def load_model(self):
         model_path = self.get_last_model_path()
@@ -127,7 +147,6 @@ class SimpleUAVProtocol(IProtocol):
             model.load_state_dict(torch.load(model_path))
             print(f"Model loaded from {model_path}")
         return model
-
 
     def get_last_model_path(self):
         output_base_dir = 'output'
@@ -173,20 +192,18 @@ class SimpleUAVProtocol(IProtocol):
         global_dict = self.model.state_dict()
 
         if self.training_mode == 'autoencoder':
-            # Aggregating for Autoencoder
             for k in global_dict.keys():
                 if k in client_dict:
-                    if global_dict[k].size() == client_dict[k].size():  # Ensure sizes match
+                    if global_dict[k].size() == client_dict[k].size():
                         global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
                     else:
                         self._log.warning(f"Size mismatch for key {k} in Autoencoder mode. Skipping aggregation for this key.")
                 else:
                     self._log.warning(f"Key {k} not found in client model for Autoencoder mode. Skipping aggregation for this key.")
         else:
-            # Aggregating for Supervisioned Model
             for k in global_dict.keys():
                 if k in client_dict:
-                    if global_dict[k].size() == client_dict[k].size():  # Ensure sizes match
+                    if global_dict[k].size() == client_dict[k].size():
                         global_dict[k] = (1 - alpha) * global_dict[k] + alpha * client_dict[k].dequantize()
                     else:
                         self._log.warning(f"Size mismatch for key {k} in Supervisioned mode. Skipping aggregation for this key.")
@@ -201,26 +218,86 @@ class SimpleUAVProtocol(IProtocol):
     def handle_timer(self, timer: str) -> None:
         self._send_heartbeat()
 
+    def process_messages(self):
+        while True:
+            # Get the next message from the queue
+            message = self.message_queue.get()
+            if message is None:
+                break  # Exit the loop if None is received
+
+            # Process the message
+            self.process_single_message(message)
+
+            # Indicate that the message has been processed
+            self.message_queue.task_done()
+
+    def process_single_message(self, message: str):
+        try:
+            message: SimpleMessage = json.loads(message)
+            sender_id = message['sender']
+
+            # Debounce logic
+            current_time = self.provider.current_time()
+            last_received = self.last_received_time.get(sender_id, 0)
+            if message['type'] == 'model_update' and current_time - last_received < self.debounce_interval:
+                self._log.info(f"[UAV {self.id}] Debounced message from {sender_id}")
+                return
+
+            # Update the last received time for this sender
+            self.last_received_time[sender_id] = current_time
+
+            if message['type'] == 'model_update':
+                self._log.info(f"[UAV {self.id}] Received model update from UAV {sender_id}")
+                self.training_cycles[sender_id] = message.get('training_cycles', 0)
+                self.model_updates[sender_id] = message.get('model_updates', 0)
+                self.success_rates[sender_id] = message.get('success_rate', 0.0)
+                self.last_update_time = self.provider.current_time()
+                self.model_update_count += 1
+
+                decompressed_state_dict = decompress_and_deserialize_state_dict(message['payload'])
+                self.update_global_model_with_client(decompressed_state_dict)
+
+                response_message: SimpleMessage = {
+                    'sender_type': SimpleSender.UAV.value,
+                    'payload': self.serialize_state_dict(self.model.state_dict()),
+                    'sender': self.id,
+                    'packet_count': self.packet_count,
+                    'type': 'model_update'
+                }
+                command = SendMessageCommand(json.dumps(response_message), sender_id)
+                self.provider.send_communication_command(command)
+
+            elif message['type'] == 'ping':
+                self._log.info(f"[UAV {self.id}] Received ping from sensor {sender_id}")
+
+                response_message: SimpleMessage = {
+                    'sender_type': SimpleSender.UAV.value,
+                    'payload': self.serialize_state_dict(self.model.state_dict()),
+                    'sender': self.id,
+                    'packet_count': self.packet_count,
+                    'type': 'model_update',
+                    'training_cycles': self.training_cycles.get(self.id, 0),
+                    'model_updates': self.model_updates.get(self.id, 0),
+                    'success_rate': self.success_rates.get(self.id, 0.0)
+                }
+                command = BroadcastMessageCommand(json.dumps(response_message))
+                self.provider.send_communication_command(command)
+
+            else:
+                self._log.warning(f"[UAV {self.id}] Received unknown message type from sender {sender_id}")
+
+        except KeyError as e:
+            self._log.error(f"KeyError: Missing key in message - {e}")
+        except Exception as e:
+            self._log.error(f"Unexpected error occurred: {e}", exc_info=True)
+
     def handle_packet(self, message: str) -> None:
-        message: SimpleMessage = json.loads(message)
-        self.training_cycles[message['sender']] = message['training_cycles']
-        self.model_updates[message['sender']] = message['model_updates']
-        self.success_rates[message['sender']] = message.get('success_rate', 0)
-        decompressed_state_dict = decompress_and_deserialize_state_dict(message['payload'])
-        self.update_global_model_with_client(decompressed_state_dict)
-        self._log.info(f'Sending model update')
-        message: SimpleMessage = {
-            'sender_type': SimpleSender.UAV.value,
-            'payload': self.serialize_state_dict(self.model.state_dict()),
-            'sender': self.id,
-            'packet_count': self.packet_count,
-            'type': 'model_update'
-        }
-        command = BroadcastMessageCommand(json.dumps(message))
-        self.provider.send_communication_command(command)
+        # Enqueue the message for processing by the background thread
+        self.message_queue.put(message)
+
 
     def handle_telemetry(self, telemetry: Telemetry) -> None:
-        pass
+        pass    
 
     def finish(self) -> None:
         _, testset = download_dataset()
@@ -272,9 +349,8 @@ class SimpleUAVProtocol(IProtocol):
         print(f'Clustering Accuracy: {clustering_accuracy}')
         print(f'Adjusted Rand Index: {ari}')
 
-        # Save the metrics and plots
-        torch.save(self.model.state_dict(), os.path.join(output_dir, 'model.pth'))
-        with open(os.path.join(output_dir, 'stats.txt'), 'w') as f:
+        torch.save(self.model.state_dict(), os.path.join(output_dir, f'model_{self.id}.pth'))
+        with open(os.path.join(output_dir, f'stats_{self.id}.txt'), 'w') as f:
             f.write(f'Mean Reconstruction Loss: {mean_reconstruction_loss}\n')
             f.write(f'Classification Loss: {mean_classification_loss}\n')
             f.write(f'Accuracy: {accuracy}\n')
@@ -284,7 +360,6 @@ class SimpleUAVProtocol(IProtocol):
             f.write(f'Training Cycles: {self.training_cycles}\n')
             f.write(f'Success Rates: {self.success_rates}\n')
 
-        # Plot the metrics
         plot_mse(mse_values, output_dir)
         plot_clustering_metrics(clustering_accuracy, ari, output_dir)
 
@@ -320,9 +395,8 @@ class SimpleUAVProtocol(IProtocol):
         print(f'Clustering Accuracy: {clustering_accuracy}')
         print(f'Adjusted Rand Index: {ari}')
 
-        # Save the metrics and plots
-        torch.save(self.model.state_dict(), os.path.join(output_dir, 'model.pth'))
-        with open(os.path.join(output_dir, 'stats.txt'), 'w') as f:
+        torch.save(self.model.state_dict(), os.path.join(output_dir, f'model_{self.id}.pth'))
+        with open(os.path.join(output_dir, f'stats_{self.id}.txt'), 'w') as f:
             f.write(f'Loss: {mean_loss}\n')
             f.write(f'Accuracy: {accuracy}\n')
             f.write(f'Clustering Accuracy: {clustering_accuracy}\n')
@@ -331,8 +405,7 @@ class SimpleUAVProtocol(IProtocol):
             f.write(f'Training Cycles: {self.training_cycles}\n')
             f.write(f'Success Rates: {self.success_rates}\n')
 
-        # Plot the metrics
-        plot_mse([mean_loss], output_dir)  # Plotting classification loss as MSE for visualization
+        plot_mse([mean_loss], output_dir)
         plot_clustering_metrics(clustering_accuracy, ari, output_dir)
 
 def extract_features(dataloader, model, training_mode):

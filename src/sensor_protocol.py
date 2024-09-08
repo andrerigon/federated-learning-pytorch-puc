@@ -273,7 +273,7 @@ class SimpleSensorProtocol(IProtocol):
 
         self._log.info(simple_message)
         if simple_message['sender_type'] == SimpleSender.UAV.value and self.model_updated:
-            print(f"\n\n [{self.id}] Local Model updated! \n\n")
+            self._log.info(f"\n\n [{self.id}] Local Model updated! \n\n")
             self.model_updated = False
             response: SimpleMessage = {
                 'payload': self.serialize_state_dict(self.current_state),
@@ -290,7 +290,7 @@ class SimpleSensorProtocol(IProtocol):
 
             self.packet_count += 1
         if simple_message['type'] == 'model_update':
-            print(f"\n\n [{self.id}] Got model update from UAV! \n\n")
+            self._log.info(f"\n\n [{self.id}] Got model update from UAV! \n\n")
             state = decompress_and_deserialize_state_dict(simple_message['payload'])
             self.global_model.load_state_dict(state)
             self.global_model_changed = True
