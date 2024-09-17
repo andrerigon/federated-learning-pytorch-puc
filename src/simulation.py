@@ -9,18 +9,30 @@ from uav_protocol import SimpleUAVProtocol
 from sensor_protocol import SimpleSensorProtocol
 import random
 
-def create_protocol_with_params(protocol_class, **init_params):
+def create_protocol_with_params(protocol_class, class_name=None, **init_params):
     """
-    Dynamically creates a class that wraps the given protocol_class and injects the init_params
+    Dynamically creates a class that wraps the given protocol_class and injects the init_params,
+    allowing you to specify the class name of the wrapper.
     """
-    class ProtocolWrapper(protocol_class):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            for key, value in init_params.items():
-                setattr(self, key, value)
-    return ProtocolWrapper
+    # If no class_name is provided, default to protocol_class's name with 'Wrapper' appended
+    if class_name is None:
+        class_name = protocol_class.__name__
 
-sensor_positions = [(150, 0, 0), (0, 150, 0), (-150, 0, 0), (0, -150, 0)]
+    # Define the __init__ method for the new class
+    def __init__(self, *args, **kwargs):
+        # Call the __init__ method of the parent class
+        super(self.__class__, self).__init__(*args, **kwargs)
+        # Set the initial parameters as attributes
+        for key, value in init_params.items():
+            setattr(self, key, value)
+
+    # Create a dictionary of class attributes
+    class_attrs = {'__init__': __init__}
+
+    # Dynamically create the new class with the specified name
+    new_class = type(class_name, (protocol_class,), class_attrs)
+
+    return new_class
 
 def generate_mission_list(num_uavs: int, sensor_positions: list) -> list:
     """
@@ -78,6 +90,8 @@ def main():
 
     print(f"Args: {args}")
 
+    sensor_positions = [(150, 0, 0), (0, 150, 0), (-150, 0, 0), (0, -150, 0)]
+
     config = SimulationConfiguration(
         duration=args.duration,
         execution_logging=False
@@ -86,16 +100,19 @@ def main():
 
     mission_lists = generate_mission_list(args.num_uavs, sensor_positions)
 
-    builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (150, 0, 0))
-    builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (0, 150, 0))
-    builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (-150, 0, 0))
-    builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (0, -150, 0))
+    sensor_ids: list[int] = []
+
+    sensor_ids.append(builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (150, 0, 0)))
+    sensor_ids.append(builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (0, 150, 0)))
+    sensor_ids.append(builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (-150, 0, 0)))
+    sensor_ids.append(builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (0, -150, 0)))
 
     # Add UAVs to the simulation, starting them at random positions
+    leader_ids = []
     for i in range(args.num_uavs):
         start_position = mission_lists[i][0]  # Use the first position in the mission list as the start position
         uav_protocol = create_protocol_with_params(SimpleUAVProtocol, training_mode=args.mode, from_scratch=args.from_scratch, uav_id=i + 1, mission_list=mission_lists[i])
-        builder.add_node(uav_protocol, start_position)
+        leader_ids.append(builder.add_node(uav_protocol, start_position))
     
     # Add handlers as before
     builder.add_handler(TimerHandler())
@@ -111,7 +128,70 @@ def main():
     )))
 
     simulation = builder.build()
-    simulation.start_simulation()
+
+    node = simulation.get_node(sensor_ids[0])
+    print(f"\n\n\nprotocol: {node.protocol_encapsulator.protocol.bla()}\n\n\n")
+
+
+    positions = []
+    sensor_positions = []
+
+    for sensor_id in sensor_ids:
+        sensor_position = simulation.get_node(sensor_id).position
+        sensor_positions.append({
+            "role": "sensor",
+            "x": sensor_position[0],
+            "y": sensor_position[1],
+            "z": sensor_position[2],
+        })
+
+    while simulation.step_simulation():
+        current_time = simulation._current_timestamp # Não gostei disso, vou tornar uma propriedade mais fácil de acessar
+
+        for leader_id in leader_ids:
+            leader_position = simulation.get_node(leader_id).position
+            positions.append({
+                "role": "UAV",
+                "agent": leader_id,
+                "timestamp": current_time,
+                "x": leader_position[0],
+                "y": leader_position[1],
+                "z": leader_position[2],
+            })
+
+    import pandas as pd
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    position_df = pd.DataFrame.from_records(positions)
+    position_df = position_df.set_index("timestamp")
+
+    sensor_df = pd.DataFrame.from_records(sensor_positions)
+
+    # Estilizando gráfico
+    sns.set_theme()
+    sns.set_context("talk")
+    sns.set_style("whitegrid")
+    fig, ax = plt.subplots(figsize=(12, 12))
+
+    # Plotando posições dos sensores (fixos) com um "x"
+    sns.scatterplot(data=sensor_df, x="x", y="y", ax=ax, marker='x', color='black',
+                    label='Sensors', s=100, linewidth=2)
+
+    # Plotando as posições dos agentes ao longo do tempo. Líder em vermelho e seguidores e mazul
+    grouped = position_df.groupby("agent")
+    for name, group in grouped:
+        role = group["role"].iloc[0]
+        plt.plot(group['x'], group['y'], marker='o', linestyle='-', ms=1,
+                 label=role, color='#cf7073' if role == "leader" else '#4c72b0')
+
+    # Mostrando legenda. As duas primeiras linhas garantem que não vão ter elementos repetidos na legenda
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys())
+
+    # Salvando o gráfico
+    plt.savefig("path.png")
 
 if __name__ == "__main__":
     main()

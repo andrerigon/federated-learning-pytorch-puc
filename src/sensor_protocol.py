@@ -229,15 +229,17 @@ class SimpleSensorProtocol(IProtocol):
                 return
 
             local_model.eval()
+            # Log model sizes
+            self.log_model_sizes(local_model)
             local_model = torch.quantization.convert(local_model, mapping={'fc_layers': torch.nn.Identity})
             self.current_state = local_model.state_dict()
             self.model_updated = True
 
-            # Log model sizes
-            self.log_model_sizes(local_model)
-
         except Exception as e:
             logging.error(f"Error in client {self.id}", exc_info=True)
+
+    def bla(self):
+        print(f"\n\nme meg todim todim\n")
 
     def log_model_sizes(self, model):
         non_quantized_size = self.get_model_size(model)
