@@ -8,6 +8,8 @@ from gradysim.simulator.simulation import SimulationBuilder, SimulationConfigura
 from uav_protocol import SimpleUAVProtocol
 from sensor_protocol import SimpleSensorProtocol
 import random
+from sklearn.cluster import KMeans
+import numpy as np
 
 def create_protocol_with_params(protocol_class, class_name=None, **init_params):
     """
@@ -34,13 +36,24 @@ def create_protocol_with_params(protocol_class, class_name=None, **init_params):
 
     return new_class
 
-def generate_mission_list(num_uavs: int, sensor_positions: list) -> list:
+def cluster_sensors(sensor_positions: list, num_uavs: int):
+    sensor_coords = np.array([pos[:2] for pos in sensor_positions])  # Use x, y positions
+    kmeans = KMeans(n_clusters=num_uavs, random_state=0).fit(sensor_coords)
+    labels = kmeans.labels_
+    clusters = [[] for _ in range(num_uavs)]
+    for idx, label in enumerate(labels):
+        clusters[label].append(sensor_positions[idx])
+    return clusters
+
+def generate_mission_list(num_uavs: int, sensor_positions: list, repetitions: int = 1) -> list:
     """
-    Generates a mission list for each UAV ensuring that each UAV visits all sensor positions.
+    Generates a mission list for each UAV where each UAV repeatedly visits its assigned sensors,
+    goes to the center, and restarts the loop for a specified number of repetitions.
 
     Args:
         num_uavs: Number of UAVs.
         sensor_positions: List of tuples representing the (x, y, z) positions of the sensors.
+        repetitions: Number of times each UAV should repeat its mission loop.
 
     Returns:
         List of mission lists for each UAV.
@@ -48,29 +61,20 @@ def generate_mission_list(num_uavs: int, sensor_positions: list) -> list:
     # Center position where all UAVs meet after visiting sensors
     center_position = (0, 0, 0)
 
-    # Calculate the number of sensors per UAV
-    sensors_per_uav = len(sensor_positions) // num_uavs
-    extra_sensors = len(sensor_positions) % num_uavs
+    # Cluster sensors based on their positions
+    clusters = cluster_sensors(sensor_positions, num_uavs)
 
     mission_lists = []
 
-    sensor_index = 0
     for uav_index in range(num_uavs):
-        # Assign sensors to the UAV
+        # Assign the cluster to the UAV
+        uav_sensors = clusters[uav_index]
+
+        # Create the repeated mission sequence
         uav_mission = []
-        for _ in range(sensors_per_uav):
-            uav_mission.append(sensor_positions[sensor_index])
-            sensor_index += 1
-        
-        # Distribute extra sensors
-        if uav_index < extra_sensors:
-            uav_mission.append(sensor_positions[sensor_index])
-            sensor_index += 1
-
-        # Add the center position to meet other UAVs
-        uav_mission.append(center_position)
-
-        # No need to add the return journey manually since `LoopMission.REVERSE` will handle it.
+        for _ in range(repetitions):
+            uav_mission.extend(uav_sensors)
+            uav_mission.append(center_position)
 
         mission_lists.append(uav_mission)
 
@@ -84,7 +88,7 @@ def main():
     parser.add_argument('--from_scratch', action='store_true', help='Start training from scratch without loading a pre-trained model')
     parser.add_argument('--resume', dest='from_scratch', action='store_false', help='Do not start from scratch, use pre-trained model')
     parser.add_argument('--success_rate', type=float, default=1.0, help='Communication success rate (0.0 to 1.0)')
-    parser.add_argument('--num_uavs', type=int, default=4, help='Number of UAVs in the simulation')
+    parser.add_argument('--num_uavs', type=int, default=1, help='Number of UAVs in the simulation')
 
     args = parser.parse_args()
 

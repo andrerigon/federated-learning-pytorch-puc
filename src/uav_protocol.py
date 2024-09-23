@@ -20,6 +20,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import accuracy_score, adjusted_rand_score, confusion_matrix
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import pandas as pd
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -47,9 +48,9 @@ def decompress_and_deserialize_state_dict(serialized_state_dict):
 def plot_mse(mse_values, output_dir):
     plt.figure()
     plt.plot(mse_values, marker='o')
-    plt.title('Mean Squared Error over Test Batches')
-    plt.xlabel('Batch')
-    plt.ylabel('MSE')
+    plt.title('Mean Squared Error over Test Batches', fontsize=14)
+    plt.xlabel('Batch', fontsize=14)
+    plt.ylabel('MSE', fontsize=14)
     plt.grid(True)
     plt.savefig(os.path.join(output_dir, 'mse_plot.png'))
     plt.close()
@@ -58,8 +59,8 @@ def plot_clustering_metrics(accuracy, ari, output_dir):
     metrics = {'Clustering Accuracy': accuracy, 'Adjusted Rand Index': ari}
     plt.figure()
     plt.bar(metrics.keys(), metrics.values())
-    plt.title('Clustering Evaluation Metrics')
-    plt.ylabel('Score')
+    plt.title('Clustering Evaluation Metrics', fontsize=14)
+    plt.ylabel('Score', fontsize=14)
     plt.ylim(0, 1)
     plt.grid(True)
     plt.savefig(os.path.join(output_dir, 'clustering_metrics.png'))
@@ -69,9 +70,9 @@ def plot_confusion_matrix(labels, predicted_labels, classes, output_dir):
     cm = confusion_matrix(labels, predicted_labels)
     plt.figure(figsize=(10, 7))
     sns.heatmap(cm, annot=True, fmt='d', xticklabels=classes, yticklabels=classes)
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    plt.title('Confusion Matrix')
+    plt.xlabel('Predicted', fontsize=14)
+    plt.ylabel('True', fontsize=14)
+    plt.title('Confusion Matrix', fontsize=14)
     plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
     plt.close()
 
@@ -81,7 +82,7 @@ def plot_tsne(features, labels, output_dir):
     plt.figure(figsize=(10, 7))
     scatter = plt.scatter(tsne_features[:, 0], tsne_features[:, 1], c=labels, cmap='tab10')
     plt.legend(handles=scatter.legend_elements()[0], labels=range(10))
-    plt.title('t-SNE Visualization of Features')
+    plt.title('t-SNE Visualization of Features', fontsize=14)
     plt.savefig(os.path.join(output_dir, 'tsne_plot.png'))
     plt.close()
 
@@ -117,10 +118,12 @@ class SimpleUAVProtocol(IProtocol):
 
         self.packet_count = 0
         self.id = self.provider.get_id()
+        self.global_model_version = 1  # Start with version 1
+        self.staleness_records = []    # To record staleness metrics
         print(f"Starting uva [{self.id}]")
 
         # Initialize the MissionMobilityPlugin with the mission list for this UAV
-        mission_config = MissionMobilityConfiguration(loop_mission=LoopMission.REVERSE)
+        mission_config = MissionMobilityConfiguration(loop_mission=LoopMission.RESTART)
         self._mission = MissionMobilityPlugin(self, mission_config)
         print(f"Mission list: {self.mission_list}")
         self._mission.start_mission(self.mission_list)  # Start the mission with the provided list
@@ -182,7 +185,8 @@ class SimpleUAVProtocol(IProtocol):
             'packet_count': self.packet_count,
             'sender_type': SimpleSender.UAV.value,
             'sender': self.provider.get_id(),
-            'type': 'ping'
+            'type': 'ping',
+            'global_model_version': self.global_model_version 
         }
         command = BroadcastMessageCommand(json.dumps(message))
         self.provider.send_communication_command(command)
@@ -210,6 +214,8 @@ class SimpleUAVProtocol(IProtocol):
                 else:
                     self._log.warning(f"Key {k} not found in client model for Supervisioned mode. Skipping aggregation for this key.")
         
+        self.global_model_version += 1
+        print(f"New global modal is {self.global_model_version}")
         self.model.load_state_dict(global_dict)
         self.model.eval()
         self.model = torch.quantization.convert(self.model)
@@ -251,6 +257,14 @@ class SimpleUAVProtocol(IProtocol):
                 self.training_cycles[sender_id] = message.get('training_cycles', 0)
                 self.model_updates[sender_id] = message.get('model_updates', 0)
                 self.success_rates[sender_id] = message.get('success_rate', 0.0)
+                client_model_version = message.get('local_model_version', 0)
+                staleness = self.global_model_version - client_model_version
+                self._log.info(f"[UAV {self.id}] Received model update from Sensor {sender_id} with staleness {staleness}")
+                self.staleness_records.append({
+                    'sensor_id': sender_id,
+                    'staleness': staleness,
+                    'timestamp': self.provider.current_time()
+                })
                 self.last_update_time = self.provider.current_time()
                 self.model_update_count += 1
 
@@ -262,7 +276,8 @@ class SimpleUAVProtocol(IProtocol):
                     'payload': self.serialize_state_dict(self.model.state_dict()),
                     'sender': self.id,
                     'packet_count': self.packet_count,
-                    'type': 'model_update'
+                    'type': 'model_update',
+                    'global_model_version': self.global_model_version
                 }
                 command = SendMessageCommand(json.dumps(response_message), sender_id)
                 self.provider.send_communication_command(command)
@@ -308,7 +323,42 @@ class SimpleUAVProtocol(IProtocol):
             self.check_autoencoder(testloader, output_dir)
         else:
             self.check_supervisioned(testloader, output_dir)
+        self.record_staleness_metrics(output_dir)            
         self._log.info(f"Final packet count: {self.packet_count}")
+
+    def record_staleness_metrics(self, output_dir):
+        if not self.staleness_records:
+            return
+        
+        staleness_values = [record['staleness'] for record in self.staleness_records]
+        average_staleness = sum(staleness_values) / len(staleness_values)
+        max_staleness = max(staleness_values)
+        min_staleness = min(staleness_values)
+        print(f"Average Staleness: {average_staleness}")
+        print(f"Max Staleness: {max_staleness}")
+        print(f"Min Staleness: {min_staleness}")
+
+        with open(os.path.join(output_dir, f'staleness_metrics_{self.id}.txt'), 'w') as f:
+            f.write(f"Average Staleness: {average_staleness}\n")
+            f.write(f"Max Staleness: {max_staleness}\n")
+            f.write(f"Min Staleness: {min_staleness}\n")
+            f.write("Staleness Records:\n")
+            for record in self.staleness_records:
+                f.write(f"{record}\n")  
+
+        staleness_df = pd.DataFrame(self.staleness_records)
+        staleness_df.to_csv(os.path.join(output_dir, f'staleness_records_{self.id}.csv'), index=False)
+
+        plt.figure()
+        for sensor_id in staleness_df['sensor_id'].unique():
+            sensor_data = staleness_df[staleness_df['sensor_id'] == sensor_id]
+            plt.plot(sensor_data['timestamp'], sensor_data['staleness'], label=f"Sensor {sensor_id}")
+        plt.xlabel('Timestamp', fontsize=14)
+        plt.ylabel('Staleness', fontsize=14)
+        plt.title(f'Staleness Over Time for UAV {self.id}', fontsize=14)
+        plt.legend()
+        plt.savefig(os.path.join(output_dir, f'staleness_over_time_{self.id}.png'))
+        plt.close()                      
 
     def check_autoencoder(self, testloader, output_dir):
         criterion_reconstruction = nn.MSELoss()

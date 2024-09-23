@@ -36,6 +36,8 @@ class SimpleMessage(TypedDict):
     training_cycles: int
     model_updates: int
     success_rate: float
+    global_model_version: int  # For messages from UAV to sensors
+    local_model_version: int   # For messages from sensors to UAV
 
 def report_message(message: SimpleMessage) -> str:
     return ''
@@ -83,6 +85,7 @@ class SimpleSensorProtocol(IProtocol):
         self.loader = DataLoader(self.splited_dataset[self.id], batch_size=32, shuffle=True, num_workers=10, pin_memory=True)
         self.training_cycles = 0
         self.model_updates = 0
+        self.global_model_version = 0
 
         # Communication Mediator with configurable success rate
         self.communicator = CommunicationMediator(success_rate = self.success_rate)
@@ -274,29 +277,48 @@ class SimpleSensorProtocol(IProtocol):
         simple_message: SimpleMessage = json.loads(message)
 
         self._log.info(simple_message)
-        if simple_message['sender_type'] == SimpleSender.UAV.value and self.model_updated:
-            self._log.info(f"\n\n [{self.id}] Local Model updated! \n\n")
-            self.model_updated = False
-            response: SimpleMessage = {
-                'payload': self.serialize_state_dict(self.current_state),
-                'sender': self.id,
-                'packet_count': self.packet_count,
-                'type': 'model_update',
-                'training_cycles': self.training_cycles,
-                'model_updates': self.model_updates,
-                'success_rate': self.communicator.successful_attempts / self.communicator.total_attempts if self.communicator.total_attempts > 0 else 0
-            }
+        
+        # If the message is from a UAV
+        if simple_message['sender_type'] == SimpleSender.UAV.value:
+            # If it's a model update message
+            if simple_message['type'] == 'model_update':
+                new_version = simple_message.get('global_model_version', 0)
+                if new_version <= self.global_model_version:
+                    # Discard the message
+                    print(f"Sensor {self.id}: Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
+                    return  # Exit without processing
+                # Else, process the model update
+                print(f"Sensor {self.id}: Received new model update from UAV {simple_message['sender']} with version {new_version}")
+                state = decompress_and_deserialize_state_dict(simple_message['payload'])
+                self.global_model.load_state_dict(state)
+                self.global_model_changed = True
+                self.model_updates += 1
+                self.global_model_version = new_version
+                # # Set a flag to start training with the new model
+                # self.model_updated = True
 
-            command = SendMessageCommand(json.dumps(response), simple_message['sender'])
-            self.communicator.send_message(command, self.provider)
-
-            self.packet_count += 1
-        if simple_message['type'] == 'model_update':
-            self._log.info(f"\n\n [{self.id}] Got model update from UAV! \n\n")
-            state = decompress_and_deserialize_state_dict(simple_message['payload'])
-            self.global_model.load_state_dict(state)
-            self.global_model_changed = True
-            self.model_updates += 1
+            # If it's a ping and the local model is updated
+            elif simple_message['type'] == 'ping' and self.model_updated:
+                new_version = simple_message.get('global_model_version', 0)
+                if new_version <= self.global_model_version:
+                    # Discard the message
+                    self._log.info(f"Sensor {self.id}: Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
+                    return  # Exit without processing
+                self.model_updated = False
+                self._log.info(f"Sensor {self.id}: Responding to ping from UAV {simple_message['sender']}")
+                response: SimpleMessage = {
+                    'payload': self.serialize_state_dict(self.current_state),
+                    'sender': self.id,
+                    'packet_count': self.packet_count,
+                    'type': 'model_update',
+                    'training_cycles': self.training_cycles,
+                    'model_updates': self.model_updates,
+                    'success_rate': self.communicator.successful_attempts / self.communicator.total_attempts if self.communicator.total_attempts > 0 else 0,
+                    'local_model_version': self.global_model_version  # Include version used for training
+                }
+                command = SendMessageCommand(json.dumps(response), simple_message['sender'])
+                self.communicator.send_message(command, self.provider)
+                self.packet_count += 1
 
     def handle_telemetry(self, telemetry: Telemetry) -> None:
         pass
