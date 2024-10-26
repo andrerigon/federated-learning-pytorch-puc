@@ -10,6 +10,11 @@ from sensor_protocol import SimpleSensorProtocol
 import random
 from sklearn.cluster import KMeans
 import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import os 
+import datetime
 
 def create_protocol_with_params(protocol_class, class_name=None, **init_params):
     """
@@ -80,6 +85,38 @@ def generate_mission_list(num_uavs: int, sensor_positions: list, repetitions: in
 
     return mission_lists
 
+def plot_path(positions, sensor_positions, output_dir):
+    position_df = pd.DataFrame.from_records(positions)
+    position_df = position_df.set_index("timestamp")
+
+    sensor_df = pd.DataFrame.from_records(sensor_positions)
+
+    # Estilizando gráfico
+    sns.set_theme()
+    sns.set_context("talk")
+    sns.set_style("whitegrid")
+    fig, ax = plt.subplots(figsize=(12, 12))
+
+    # Plotando posições dos sensores (fixos) com um "x"
+    sns.scatterplot(data=sensor_df, x="x", y="y", ax=ax, marker='x', color='black',
+                    label='Sensors', s=100, linewidth=2)
+
+    # Plotando as posições dos agentes ao longo do tempo. Líder em vermelho e seguidores e mazul
+    grouped = position_df.groupby("agent")
+    for name, group in grouped:
+        role = group["role"].iloc[0]
+        plt.plot(group['x'], group['y'], marker='o', linestyle='-', ms=1,
+                 label=role, color='#cf7073' if role == "leader" else '#4c72b0')
+
+    # Mostrando legenda. As duas primeiras linhas garantem que não vão ter elementos repetidos na legenda
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys())
+
+    path = os.path.join(output_dir, 'path.png')
+    # Salvando o gráfico
+    plt.savefig(path)
+
 def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Federated Learning with Autoencoders on CIFAR-10')
@@ -113,9 +150,12 @@ def main():
 
     # Add UAVs to the simulation, starting them at random positions
     leader_ids = []
+    output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'), args.mode)
+
+    os.makedirs(output_dir, exist_ok=True)
     for i in range(args.num_uavs):
         start_position = mission_lists[i][0]  # Use the first position in the mission list as the start position
-        uav_protocol = create_protocol_with_params(SimpleUAVProtocol, training_mode=args.mode, from_scratch=args.from_scratch, uav_id=i + 1, mission_list=mission_lists[i])
+        uav_protocol = create_protocol_with_params(SimpleUAVProtocol, training_mode=args.mode, from_scratch=args.from_scratch, uav_id=i + 1, mission_list=mission_lists[i], output_dir=output_dir)
         leader_ids.append(builder.add_node(uav_protocol, start_position))
     
     # Add handlers as before
@@ -163,39 +203,8 @@ def main():
                 "z": leader_position[2],
             })
 
-    import pandas as pd
-    import seaborn as sns
-    import matplotlib.pyplot as plt
-
-    position_df = pd.DataFrame.from_records(positions)
-    position_df = position_df.set_index("timestamp")
-
-    sensor_df = pd.DataFrame.from_records(sensor_positions)
-
-    # Estilizando gráfico
-    sns.set_theme()
-    sns.set_context("talk")
-    sns.set_style("whitegrid")
-    fig, ax = plt.subplots(figsize=(12, 12))
-
-    # Plotando posições dos sensores (fixos) com um "x"
-    sns.scatterplot(data=sensor_df, x="x", y="y", ax=ax, marker='x', color='black',
-                    label='Sensors', s=100, linewidth=2)
-
-    # Plotando as posições dos agentes ao longo do tempo. Líder em vermelho e seguidores e mazul
-    grouped = position_df.groupby("agent")
-    for name, group in grouped:
-        role = group["role"].iloc[0]
-        plt.plot(group['x'], group['y'], marker='o', linestyle='-', ms=1,
-                 label=role, color='#cf7073' if role == "leader" else '#4c72b0')
-
-    # Mostrando legenda. As duas primeiras linhas garantem que não vão ter elementos repetidos na legenda
-    handles, labels = plt.gca().get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    plt.legend(by_label.values(), by_label.keys())
-
-    # Salvando o gráfico
-    plt.savefig("path.png")
+    plot_path(positions, sensor_positions, output_dir)        
+    
 
 if __name__ == "__main__":
     main()

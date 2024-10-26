@@ -98,10 +98,12 @@ class SimpleUAVProtocol(IProtocol):
                                                                                      (0, 0, 20),
                                                                                      (-150, 0, 20),
                                                                                      (0, 0, 20),
-                                                                                     (0, -150, 20)]):
+                                                                                     (0, -150, 20)],
+                                                                                     output_dir='./'):
         self.mission_list = mission_list  # Mission list passed to each UAV
         self.training_mode = training_mode
         self.from_scratch = from_scratch
+        self.output_dir = output_dir
         
         # Debounce dictionary to track the last time a message was processed from each sender
         self.last_received_time = {}
@@ -317,16 +319,14 @@ class SimpleUAVProtocol(IProtocol):
     def finish(self) -> None:
         _, testset = download_dataset()
         testloader = DataLoader(testset, batch_size=4, shuffle=False, num_workers=2)
-        output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'), self.training_mode)
-        os.makedirs(output_dir, exist_ok=True)
         if self.training_mode == 'autoencoder':
-            self.check_autoencoder(testloader, output_dir)
+            self.check_autoencoder(testloader)
         else:
-            self.check_supervisioned(testloader, output_dir)
-        self.record_staleness_metrics(output_dir)            
+            self.check_supervisioned(testloader)
+        self.record_staleness_metrics()            
         self._log.info(f"Final packet count: {self.packet_count}")
 
-    def record_staleness_metrics(self, output_dir):
+    def record_staleness_metrics(self):
         if not self.staleness_records:
             return
         
@@ -338,7 +338,7 @@ class SimpleUAVProtocol(IProtocol):
         print(f"Max Staleness: {max_staleness}")
         print(f"Min Staleness: {min_staleness}")
 
-        with open(os.path.join(output_dir, f'staleness_metrics_{self.id}.txt'), 'w') as f:
+        with open(os.path.join(self.output_dir, f'staleness_metrics_{self.id}.txt'), 'w') as f:
             f.write(f"Average Staleness: {average_staleness}\n")
             f.write(f"Max Staleness: {max_staleness}\n")
             f.write(f"Min Staleness: {min_staleness}\n")
@@ -347,7 +347,7 @@ class SimpleUAVProtocol(IProtocol):
                 f.write(f"{record}\n")  
 
         staleness_df = pd.DataFrame(self.staleness_records)
-        staleness_df.to_csv(os.path.join(output_dir, f'staleness_records_{self.id}.csv'), index=False)
+        staleness_df.to_csv(os.path.join(self.output_dir, f'staleness_records_{self.id}.csv'), index=False)
 
         plt.figure()
         for sensor_id in staleness_df['sensor_id'].unique():
@@ -357,10 +357,10 @@ class SimpleUAVProtocol(IProtocol):
         plt.ylabel('Staleness', fontsize=14)
         plt.title(f'Staleness Over Time for UAV {self.id}', fontsize=14)
         plt.legend()
-        plt.savefig(os.path.join(output_dir, f'staleness_over_time_{self.id}.png'))
+        plt.savefig(os.path.join(self.output_dir, f'staleness_over_time_{self.id}.png'))
         plt.close()                      
 
-    def check_autoencoder(self, testloader, output_dir):
+    def check_autoencoder(self, testloader):
         criterion_reconstruction = nn.MSELoss()
         criterion_classification = nn.CrossEntropyLoss()
         total_reconstruction_loss = 0
@@ -391,7 +391,7 @@ class SimpleUAVProtocol(IProtocol):
         mean_classification_loss = total_classification_loss / len(testloader)
         accuracy = 100 * accuracy_score(all_labels, all_predictions)
         features, _ = extract_features(testloader, self.model, "autoencoder")
-        clustering_accuracy, ari = evaluate_clustering(features, all_labels, output_dir)
+        clustering_accuracy, ari = evaluate_clustering(features, all_labels, self.output_dir)
 
         print(f'Mean Squared Error of the network on the test images: {mean_reconstruction_loss}')
         print(f'Classification Loss: {mean_classification_loss}')
@@ -399,8 +399,8 @@ class SimpleUAVProtocol(IProtocol):
         print(f'Clustering Accuracy: {clustering_accuracy}')
         print(f'Adjusted Rand Index: {ari}')
 
-        torch.save(self.model.state_dict(), os.path.join(output_dir, f'model_{self.id}.pth'))
-        with open(os.path.join(output_dir, f'stats_{self.id}.txt'), 'w') as f:
+        torch.save(self.model.state_dict(), os.path.join(self.output_dir, f'model_{self.id}.pth'))
+        with open(os.path.join(self.output_dir, f'stats_{self.id}.txt'), 'w') as f:
             f.write(f'Mean Reconstruction Loss: {mean_reconstruction_loss}\n')
             f.write(f'Classification Loss: {mean_classification_loss}\n')
             f.write(f'Accuracy: {accuracy}\n')
@@ -410,10 +410,10 @@ class SimpleUAVProtocol(IProtocol):
             f.write(f'Training Cycles: {self.training_cycles}\n')
             f.write(f'Success Rates: {self.success_rates}\n')
 
-        plot_mse(mse_values, output_dir)
-        plot_clustering_metrics(clustering_accuracy, ari, output_dir)
+        plot_mse(mse_values, self.output_dir)
+        plot_clustering_metrics(clustering_accuracy, ari, self.output_dir)
 
-    def check_supervisioned(self, testloader, output_dir):
+    def check_supervisioned(self, testloader):
         criterion = nn.CrossEntropyLoss()
         total_loss = 0
         correct = 0
@@ -438,15 +438,15 @@ class SimpleUAVProtocol(IProtocol):
         mean_loss = total_loss / len(testloader)
         accuracy = 100 * correct / total
         features, _ = extract_features(testloader, self.model, "supervisioned")
-        clustering_accuracy, ari = evaluate_clustering(features, all_labels, output_dir)
+        clustering_accuracy, ari = evaluate_clustering(features, all_labels, self.output_dir)
 
         print(f'Loss of the network on the test images: {mean_loss}')
         print(f'Accuracy of the network on the test images: {accuracy}%')
         print(f'Clustering Accuracy: {clustering_accuracy}')
         print(f'Adjusted Rand Index: {ari}')
 
-        torch.save(self.model.state_dict(), os.path.join(output_dir, f'model_{self.id}.pth'))
-        with open(os.path.join(output_dir, f'stats_{self.id}.txt'), 'w') as f:
+        torch.save(self.model.state_dict(), os.path.join(self.output_dir, f'model_{self.id}.pth'))
+        with open(os.path.join(self.output_dir, f'stats_{self.id}.txt'), 'w') as f:
             f.write(f'Loss: {mean_loss}\n')
             f.write(f'Accuracy: {accuracy}\n')
             f.write(f'Clustering Accuracy: {clustering_accuracy}\n')
@@ -455,8 +455,8 @@ class SimpleUAVProtocol(IProtocol):
             f.write(f'Training Cycles: {self.training_cycles}\n')
             f.write(f'Success Rates: {self.success_rates}\n')
 
-        plot_mse([mean_loss], output_dir)
-        plot_clustering_metrics(clustering_accuracy, ari, output_dir)
+        plot_mse([mean_loss], self.output_dir)
+        plot_clustering_metrics(clustering_accuracy, ari, self.output_dir)
 
 def extract_features(dataloader, model, training_mode):
     model.eval()
