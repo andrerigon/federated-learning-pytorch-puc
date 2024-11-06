@@ -18,9 +18,12 @@ from image_classifier_supervisioned import SupervisedModel, device as sup_device
 from torch.utils.data import DataLoader
 import torch.optim as optim
 from tqdm import tqdm
+import gc
 
 import threading
 import torch
+import torch.multiprocessing as mp
+import multiprocessing.shared_memory as shm
 
 class SimpleSender(enum.Enum):
     SENSOR = 0
@@ -82,7 +85,7 @@ class SimpleSensorProtocol(IProtocol):
         self.global_model_changed = False
 
         self.global_model = self.load_model()
-        self.loader = DataLoader(self.splited_dataset[self.id], batch_size=32, shuffle=True, num_workers=10, pin_memory=True)
+        self.loader = DataLoader(self.splited_dataset[self.id], batch_size=32, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=False)
         self.training_cycles = 0
         self.model_updates = 0
         self.global_model_version = 0
@@ -153,7 +156,7 @@ class SimpleSensorProtocol(IProtocol):
                     break
                 running_reconstruction_loss = 0.0
                 running_classification_loss = 0.0
-                progress_bar = tqdm(enumerate(self.loader, 0), total=len(self.loader), desc=f'Client {self.id+1}, Epoch {epoch+1}', leave=False)
+                progress_bar = tqdm(enumerate(self.loader, 0), total=len(self.loader), desc=f'Sensor {self.id+1}, Cycle {self.training_cycles+1}', leave=False)
                 for i, data in progress_bar:
                     if self.finished:
                         break
@@ -174,10 +177,12 @@ class SimpleSensorProtocol(IProtocol):
                     running_classification_loss += classification_loss.item()
                     progress_bar.set_postfix(reconstruction_loss=running_reconstruction_loss / (i + 1),
                                             classification_loss=running_classification_loss / (i + 1))
+                    # Release batch memory
+                    del inputs, decoded, classified, loss, labels
                 scheduler.step(running_reconstruction_loss / len(self.loader))
 
             self.training_cycles += 1
-
+            
             if self.finished:
                 return
 
@@ -187,6 +192,9 @@ class SimpleSensorProtocol(IProtocol):
             local_model = torch.quantization.convert(local_model, mapping={'classifier': torch.nn.Identity})
             self.current_state = local_model.state_dict()
             self.model_updated = True
+            
+            del local_model, criterion_reconstruction, optimizer, scheduler
+            # gc.collect()
 
         except Exception as e:
             logging.error(f"Error in client {self.id}", exc_info=True)
@@ -224,6 +232,8 @@ class SimpleSensorProtocol(IProtocol):
 
                     running_loss += loss.item()
                     progress_bar.set_postfix(loss=running_loss / (i + 1))
+                # Release batch memory
+                del inputs, loss, labels    
                 scheduler.step(running_loss / len(self.loader))
 
             self.training_cycles += 1
@@ -237,6 +247,8 @@ class SimpleSensorProtocol(IProtocol):
             local_model = torch.quantization.convert(local_model, mapping={'fc_layers': torch.nn.Identity})
             self.current_state = local_model.state_dict()
             self.model_updated = True
+            del inputs, decoded, classified, loss, labels
+
 
         except Exception as e:
             logging.error(f"Error in client {self.id}", exc_info=True)
@@ -256,7 +268,8 @@ class SimpleSensorProtocol(IProtocol):
         return len(buffer.getvalue())
     
     def handle_timer(self, timer: str) -> None:
-        self._generate_packet()
+        pass
+        # self._generate_packet()
 
     def serialize_state_dict(self, state_dict):
         buffer = BytesIO()
@@ -271,7 +284,9 @@ class SimpleSensorProtocol(IProtocol):
         compressed_base64 = base64.b64encode(compressed_data).decode('utf-8')
         print(f"Serialized and compressed state_dict size: {len(compressed_data)} bytes")
         
-        return json.dumps(compressed_base64)
+        result = json.dumps(compressed_base64)
+        del compressed_data, compressed_base64
+        return result 
 
     def handle_packet(self, message: str) -> None:
         simple_message: SimpleMessage = json.loads(message)
@@ -296,6 +311,7 @@ class SimpleSensorProtocol(IProtocol):
                 self.global_model_version = new_version
                 # # Set a flag to start training with the new model
                 # self.model_updated = True
+                del state
 
             # If it's a ping and the local model is updated
             elif simple_message['type'] == 'ping' and self.model_updated:
@@ -309,6 +325,7 @@ class SimpleSensorProtocol(IProtocol):
                 response: SimpleMessage = {
                     'payload': self.serialize_state_dict(self.current_state),
                     'sender': self.id,
+                    'sender_type': SimpleSender.SENSOR.value,
                     'packet_count': self.packet_count,
                     'type': 'model_update',
                     'training_cycles': self.training_cycles,
@@ -319,14 +336,35 @@ class SimpleSensorProtocol(IProtocol):
                 command = SendMessageCommand(json.dumps(response), simple_message['sender'])
                 self.communicator.send_message(command, self.provider)
                 self.packet_count += 1
+                del command, response
+        del simple_message, message
+        # gc.collect() 
 
     def handle_telemetry(self, telemetry: Telemetry) -> None:
         pass
 
     def finish(self) -> None:
+        """
+        Clean up resources and terminate any active threads.
+        """
         self.finished = True
         self._log.info(f"Final packet count: {self.packet_count}")
         self.communicator.log_metrics()
+
+        # Wait for the training thread to complete
+        if hasattr(self, 'thread') and self.thread.is_alive():
+            self.thread.join()
+        
+        # Ensure all torch resources are freed
+        torch.cuda.empty_cache()  # Clear CUDA memory if using GPU
+        self.global_model.cpu()   # Move model to CPU to free GPU memory
+        del self.global_model     # Remove model to free memory
+
+        # Logging final status
+        self.loader._iterator = None
+        del self.loader
+        # gc.collect()
+        self._log.info("Sensor Protocol finished and cleaned up.")
 
 def decompress_and_deserialize_state_dict(serialized_state_dict):
     compressed_data = base64.b64decode(serialized_state_dict.encode('utf-8'))
@@ -334,4 +372,6 @@ def decompress_and_deserialize_state_dict(serialized_state_dict):
     with gzip.GzipFile(fileobj=compressed_buffer, mode='rb') as f:
         buffer = BytesIO(f.read())
     buffer.seek(0)
-    return torch.load(buffer)
+    result = torch.load(buffer)
+    del compressed_data, buffer
+    return result 

@@ -10,7 +10,7 @@ import base64
 import gzip
 from io import BytesIO
 import os
-import datetime
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -21,6 +21,10 @@ from sklearn.metrics import accuracy_score, adjusted_rand_score, confusion_matri
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import pandas as pd
+import gc
+import torch.multiprocessing as mp
+import multiprocessing.shared_memory as shm
+
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -43,7 +47,10 @@ def decompress_and_deserialize_state_dict(serialized_state_dict):
     with gzip.GzipFile(fileobj=compressed_buffer, mode='rb') as f:
         buffer = BytesIO(f.read())
     buffer.seek(0)
-    return torch.load(buffer)
+    
+    result = torch.load(buffer)
+    del compressed_data, buffer
+    return result
 
 def plot_mse(mse_values, output_dir):
     plt.figure()
@@ -107,6 +114,7 @@ class SimpleUAVProtocol(IProtocol):
         
         # Debounce dictionary to track the last time a message was processed from each sender
         self.last_received_time = {}
+        self.last_version = {}
         self.debounce_interval = 5  # 5 seconds debounce interval
 
         # Queue for incoming messages
@@ -180,7 +188,9 @@ class SimpleUAVProtocol(IProtocol):
         compressed_base64 = base64.b64encode(compressed_data).decode('utf-8')
         logging.info(f"Serialized and compressed state_dict size: {len(compressed_data)} bytes")
         
-        return json.dumps(compressed_base64)   
+        result = json.dumps(compressed_base64)   
+        del compressed_data, compressed_base64
+        return result
 
     def _send_heartbeat(self) -> None:
         message: SimpleMessage = {
@@ -221,7 +231,7 @@ class SimpleUAVProtocol(IProtocol):
         self.model.load_state_dict(global_dict)
         self.model.eval()
         self.model = torch.quantization.convert(self.model)
-
+        del global_dict, client_dict
 
     def handle_timer(self, timer: str) -> None:
         self._send_heartbeat()
@@ -239,34 +249,53 @@ class SimpleUAVProtocol(IProtocol):
             # Indicate that the message has been processed
             self.message_queue.task_done()
 
-    def process_single_message(self, message: str):
+    def process_single_message(self, body: str):
         try:
-            message: SimpleMessage = json.loads(message)
+            message: SimpleMessage = json.loads(body)
             sender_id = message['sender']
 
-            # Debounce logic
-            current_time = self.provider.current_time()
-            last_received = self.last_received_time.get(sender_id, 0)
-            if message['type'] == 'model_update' and current_time - last_received < self.debounce_interval:
-                self._log.info(f"[UAV {self.id}] Debounced message from {sender_id}")
-                return
+            current_time = datetime.now()
+            last_received = self.last_received_time.get(sender_id, datetime(2021, 10, 29, 15, 30, 0))
+            
 
-            # Update the last received time for this sender
-            self.last_received_time[sender_id] = current_time
+            if message['sender_type'] == SimpleSender.UAV.value and self.last_version.get(sender_id,1) >= message.get('global_model_version', 1):
+                # print(f"stored last version: {self.last_version.get(sender_id,1)} actual: {message.get('global_model_version', 1)}")
+                self._log.info(f"[UAV {self.id}] Debounced message from {sender_id} - {(current_time - last_received).total_seconds()}")
+                del message, body
+                return
+            
+            # Debounce logic
+            # print(f"current_time: {current_time} last_received: {last_received} - diff: {(current_time - last_received).total_seconds()}")
+            # if message['type'] == 'model_update' and message['sender_type'] == SimpleSender.UAV.value and (current_time - last_received).total_seconds() < self.debounce_interval:
+            #     print(f"[UAV {self.id}] Debounced message from {sender_id} - {(current_time - last_received).total_seconds()}")
+            #     del message, body
+            #     return
 
             if message['type'] == 'model_update':
-                self._log.info(f"[UAV {self.id}] Received model update from UAV {sender_id}")
+                if message['sender_type'] == SimpleSender.SENSOR.value:
+                    sender_type = "Sensor"
+                else:
+                    sender_type = "UAV"   
+                    # Update the last received time for this sender
+                    self.last_received_time[sender_id] = current_time 
+                self.last_version[sender_id] = message.get('global_model_version', 1)
+
+                print(f"[UAV {self.id}] Received model update from {sender_type} {sender_id}")
                 self.training_cycles[sender_id] = message.get('training_cycles', 0)
                 self.model_updates[sender_id] = message.get('model_updates', 0)
                 self.success_rates[sender_id] = message.get('success_rate', 0.0)
                 client_model_version = message.get('local_model_version', 0)
-                staleness = self.global_model_version - client_model_version
-                self._log.info(f"[UAV {self.id}] Received model update from Sensor {sender_id} with staleness {staleness}")
-                self.staleness_records.append({
-                    'sensor_id': sender_id,
-                    'staleness': staleness,
-                    'timestamp': self.provider.current_time()
-                })
+                
+                if(message['sender_type'] == SimpleSender.SENSOR.value): 
+                    staleness = self.global_model_version - client_model_version
+                    self._log.info(f"[UAV {self.id}] Received model update from Sensor {sender_id} with staleness {staleness}")
+                    self.staleness_records.append({
+                        'sensor_id': sender_id,
+                        'staleness': staleness,
+                        'timestamp': self.provider.current_time()
+                    })
+                
+
                 self.last_update_time = self.provider.current_time()
                 self.model_update_count += 1
 
@@ -283,6 +312,7 @@ class SimpleUAVProtocol(IProtocol):
                 }
                 command = SendMessageCommand(json.dumps(response_message), sender_id)
                 self.provider.send_communication_command(command)
+                del message, command, body, response_message
 
             elif message['type'] == 'ping':
                 self._log.info(f"[UAV {self.id}] Received ping from sensor {sender_id}")
@@ -295,10 +325,12 @@ class SimpleUAVProtocol(IProtocol):
                     'type': 'model_update',
                     'training_cycles': self.training_cycles.get(self.id, 0),
                     'model_updates': self.model_updates.get(self.id, 0),
-                    'success_rate': self.success_rates.get(self.id, 0.0)
+                    'success_rate': self.success_rates.get(self.id, 0.0),
+                    'global_model_version': self.global_model_version
                 }
                 command = BroadcastMessageCommand(json.dumps(response_message))
                 self.provider.send_communication_command(command)
+                del message, body, response_message, command
 
             else:
                 self._log.warning(f"[UAV {self.id}] Received unknown message type from sender {sender_id}")
@@ -307,6 +339,7 @@ class SimpleUAVProtocol(IProtocol):
             self._log.error(f"KeyError: Missing key in message - {e}")
         except Exception as e:
             self._log.error(f"Unexpected error occurred: {e}", exc_info=True)
+        # gc.collect()    
 
     def handle_packet(self, message: str) -> None:
         # Enqueue the message for processing by the background thread
@@ -325,6 +358,8 @@ class SimpleUAVProtocol(IProtocol):
             self.check_supervisioned(testloader)
         self.record_staleness_metrics()            
         self._log.info(f"Final packet count: {self.packet_count}")
+        testloader._iterator = None
+        gc.collect()
 
     def record_staleness_metrics(self):
         if not self.staleness_records:
@@ -412,6 +447,7 @@ class SimpleUAVProtocol(IProtocol):
 
         plot_mse(mse_values, self.output_dir)
         plot_clustering_metrics(clustering_accuracy, ari, self.output_dir)
+        del testloader
 
     def check_supervisioned(self, testloader):
         criterion = nn.CrossEntropyLoss()
@@ -503,4 +539,6 @@ def evaluate_clustering(features, labels, output_dir, n_clusters=10):
     # Plotting confusion matrix and t-SNE visualization
     plot_confusion_matrix(labels, mapped_predicted_labels, classes=range(10), output_dir=output_dir)
     plot_tsne(features, labels, output_dir)
+
+    del kmeans
     return accuracy, ari

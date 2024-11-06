@@ -15,6 +15,9 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import os 
 import datetime
+import gc
+import subprocess
+import os
 
 def create_protocol_with_params(protocol_class, class_name=None, **init_params):
     """
@@ -103,10 +106,35 @@ def plot_path(positions, sensor_positions, output_dir):
 
     # Plotando as posições dos agentes ao longo do tempo. Líder em vermelho e seguidores e mazul
     grouped = position_df.groupby("agent")
+
+    colors = {
+        1:  '#1f77b4' ,
+	    2:	'#ff7f0e',
+	    3:  '#2ca02c',
+	    4:  '#d62728'
+    }
+    
+    # Use 'tab20' colormap for up to 10 distinct colors
+    color_palette = plt.get_cmap("tab10")
+    leader_color_map = {}
+    leader_index = 0
+    follower_color = '#4c72b0'  # Keep the color for followers consistent
+
+    # Assign colors to each leader dynamically
+    leader_color_map = {}
+    leader_index = 0
+
+    # Plot with unique colors for each leader
     for name, group in grouped:
         role = group["role"].iloc[0]
-        plt.plot(group['x'], group['y'], marker='o', linestyle='-', ms=1,
-                 label=role, color='#cf7073' if role == "leader" else '#4c72b0')
+        # Assign a color if this leader is not already in the color map
+        if name not in leader_color_map:
+            leader_color_map[name] = color_palette(leader_index % 20)  # Cycle if there are more than 20 leaders
+            leader_index += 1
+        color = leader_color_map[name]  # Use the assigned color for this leader
+
+        plt.plot(group['x'], group['y'], marker='o', linestyle='-', ms=1, label=f"{role} {name}", color=color)
+
 
     # Mostrando legenda. As duas primeiras linhas garantem que não vão ter elementos repetidos na legenda
     handles, labels = plt.gca().get_legend_handles_labels()
@@ -151,11 +179,14 @@ def main():
     # Add UAVs to the simulation, starting them at random positions
     leader_ids = []
     output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'), args.mode)
-
     os.makedirs(output_dir, exist_ok=True)
+    
     for i in range(args.num_uavs):
+        uav_output_dir = os.path.join(output_dir, f"uav_{len(sensor_ids) + i}")
+        os.makedirs(uav_output_dir, exist_ok=True)
+
         start_position = mission_lists[i][0]  # Use the first position in the mission list as the start position
-        uav_protocol = create_protocol_with_params(SimpleUAVProtocol, training_mode=args.mode, from_scratch=args.from_scratch, uav_id=i + 1, mission_list=mission_lists[i], output_dir=output_dir)
+        uav_protocol = create_protocol_with_params(SimpleUAVProtocol, training_mode=args.mode, from_scratch=args.from_scratch, uav_id=i + 1, mission_list=mission_lists[i], output_dir=uav_output_dir)
         leader_ids.append(builder.add_node(uav_protocol, start_position))
     
     # Add handlers as before
@@ -203,8 +234,16 @@ def main():
                 "z": leader_position[2],
             })
 
-    plot_path(positions, sensor_positions, output_dir)        
+    plot_path(positions, sensor_positions, output_dir) 
+    del simulation
+    gc.collect()    
+ 
     
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # Find and kill torch_shm_manager processes
+        subprocess.run("pkill -f torch_shm_manager", shell=True)
+
