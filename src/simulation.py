@@ -17,7 +17,6 @@ import os
 import datetime
 import gc
 import subprocess
-import os
 
 def create_protocol_with_params(protocol_class, class_name=None, **init_params):
     """
@@ -88,6 +87,11 @@ def generate_mission_list(num_uavs: int, sensor_positions: list, repetitions: in
 
     return mission_lists
 
+def distribute_sensors(num_sensors, x_range, y_range):
+    """Distribute sensors randomly within the specified x and y range."""
+    sensor_positions = [(random.uniform(*x_range), random.uniform(*y_range), 0) for _ in range(num_sensors)]
+    return sensor_positions
+
 def plot_path(positions, sensor_positions, output_dir):
     position_df = pd.DataFrame.from_records(positions)
     position_df = position_df.set_index("timestamp")
@@ -109,9 +113,9 @@ def plot_path(positions, sensor_positions, output_dir):
 
     colors = {
         1:  '#1f77b4' ,
-	    2:	'#ff7f0e',
-	    3:  '#2ca02c',
-	    4:  '#d62728'
+        2:  '#ff7f0e',
+        3:  '#2ca02c',
+        4:  '#d62728'
     }
     
     # Use 'tab20' colormap for up to 10 distinct colors
@@ -154,12 +158,15 @@ def main():
     parser.add_argument('--resume', dest='from_scratch', action='store_false', help='Do not start from scratch, use pre-trained model')
     parser.add_argument('--success_rate', type=float, default=1.0, help='Communication success rate (0.0 to 1.0)')
     parser.add_argument('--num_uavs', type=int, default=1, help='Number of UAVs in the simulation')
+    parser.add_argument('--num_sensors', type=int, default=4, help='Number of sensors to deploy')
 
     args = parser.parse_args()
-
     print(f"Args: {args}")
 
-    sensor_positions = [(150, 0, 0), (0, 150, 0), (-150, 0, 0), (0, -150, 0)]
+    # Distribute sensors randomly in the area within x and y range (-200, 200)
+    x_range = (-200, 200)
+    y_range = (-200, 200)
+    sensor_positions = distribute_sensors(args.num_sensors, x_range, y_range)
 
     config = SimulationConfiguration(
         duration=args.duration,
@@ -169,18 +176,18 @@ def main():
 
     mission_lists = generate_mission_list(args.num_uavs, sensor_positions)
 
-    sensor_ids: list[int] = []
+    # Initialize sensor nodes
+    sensor_ids = []
+    for pos in sensor_positions:
+        sensor_protocol = create_protocol_with_params(SimpleSensorProtocol, training_mode=args.mode, from_scratch=args.from_scratch, success_rate=args.success_rate)
+        sensor_id = builder.add_node(sensor_protocol, pos)
+        sensor_ids.append(sensor_id)
 
-    sensor_ids.append(builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (150, 0, 0)))
-    sensor_ids.append(builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (0, 150, 0)))
-    sensor_ids.append(builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (-150, 0, 0)))
-    sensor_ids.append(builder.add_node(create_protocol_with_params(SimpleSensorProtocol, training_mode = args.mode, from_scratch = args.from_scratch, success_rate = args.success_rate), (0, -150, 0)))
-
-    # Add UAVs to the simulation, starting them at random positions
+    # Add UAVs to the simulation
     leader_ids = []
     output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'), args.mode)
     os.makedirs(output_dir, exist_ok=True)
-    
+
     for i in range(args.num_uavs):
         uav_output_dir = os.path.join(output_dir, f"uav_{len(sensor_ids) + i}")
         os.makedirs(uav_output_dir, exist_ok=True)
@@ -191,13 +198,11 @@ def main():
     
     # Add handlers as before
     builder.add_handler(TimerHandler())
-    builder.add_handler(CommunicationHandler(CommunicationMedium(
-        transmission_range=30
-    )))
+    builder.add_handler(CommunicationHandler(CommunicationMedium(transmission_range=30)))
     builder.add_handler(MobilityHandler())
     builder.add_handler(VisualizationHandler(VisualizationConfiguration(
-        x_range=(-200, 200),
-        y_range=(-200, 200),
+        x_range=x_range,
+        y_range=y_range,
         z_range=(0, 200),
         open_browser=False
     )))
@@ -209,11 +214,11 @@ def main():
 
 
     positions = []
-    sensor_positions = []
+    sensor_positions_log = []
 
     for sensor_id in sensor_ids:
         sensor_position = simulation.get_node(sensor_id).position
-        sensor_positions.append({
+        sensor_positions_log.append({
             "role": "sensor",
             "x": sensor_position[0],
             "y": sensor_position[1],
@@ -221,8 +226,7 @@ def main():
         })
 
     while simulation.step_simulation():
-        current_time = simulation._current_timestamp # Não gostei disso, vou tornar uma propriedade mais fácil de acessar
-
+        current_time = simulation._current_timestamp
         for leader_id in leader_ids:
             leader_position = simulation.get_node(leader_id).position
             positions.append({
@@ -234,16 +238,12 @@ def main():
                 "z": leader_position[2],
             })
 
-    plot_path(positions, sensor_positions, output_dir) 
+    plot_path(positions, sensor_positions_log, output_dir)
     del simulation
     gc.collect()    
- 
-    
 
 if __name__ == "__main__":
     try:
         main()
     finally:
-        # Find and kill torch_shm_manager processes
         subprocess.run("pkill -f torch_shm_manager", shell=True)
-

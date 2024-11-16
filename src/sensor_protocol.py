@@ -80,7 +80,7 @@ class SimpleSensorProtocol(IProtocol):
         self.packet_count = 0
         
         self.trainset, self.testset = download_dataset()
-        self.splited_dataset = split_dataset(self.trainset, 4)
+        self.splited_dataset = split_dataset(self.trainset, 10)
         self.id = self.provider.get_id()
         self.global_model_changed = False
 
