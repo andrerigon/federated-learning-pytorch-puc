@@ -21,6 +21,7 @@ import subprocess
 from dataset_loader import DatasetLoader
 from model_manager import ModelManager
 from image_classifier_autoencoders import  Autoencoder
+from federated_learning_trainer import FederatedLearningTrainer
 
 def create_protocol_with_params(protocol_class, class_name=None, **init_params):
     """
@@ -181,23 +182,29 @@ def main():
     mission_lists = generate_mission_list(args.num_uavs, sensor_positions)
 
     dataset_loader = DatasetLoader(args.num_sensors)
-    global_model = ModelManager(
+    model_manager = ModelManager(
             Autoencoder, 
             from_scratch = args.from_scratch,
             base_dir='output/autoencoder',
             num_classes=10
-        ).load_model()
+        )
+    
 
     # Initialize sensor nodes
     sensor_ids = []
+    sensor_id = 0
     for pos in sensor_positions:
+        federated_trainer = FederatedLearningTrainer(
+            sensor_id,
+            model_manager,
+            dataset_loader
+        )
         sensor_protocol = create_protocol_with_params(SimpleSensorProtocol, 
-         global_model=global_model,
-         dataset_loader=dataset_loader, 
-         training_mode=args.mode, 
+         federated_learning_trainer=federated_trainer,
          success_rate=args.success_rate)
         sensor_id = builder.add_node(sensor_protocol, pos)
         sensor_ids.append(sensor_id)
+        sensor_id += 1
 
     # Add UAVs to the simulation
     leader_ids = []

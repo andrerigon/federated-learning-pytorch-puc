@@ -9,6 +9,8 @@ import torch.nn as nn
 from pathlib import Path
 import logging
 
+ModelCreator = Union[Type[nn.Module], Callable[..., nn.Module]]
+
 class ModelManager:
     """
     Manages model persistence without knowing model implementation details.
@@ -29,7 +31,7 @@ class ModelManager:
     
     def __init__(
         self,
-        model_creator: Union[Type[nn.Module], Callable[..., nn.Module]],
+        model_creator: ModelCreator,
         base_dir: str = 'output',
         from_scratch: bool = False,
         **model_kwargs
@@ -49,7 +51,7 @@ class ModelManager:
         self.model_kwargs = model_kwargs
         self._log = logging.getLogger(__name__)
 
-    def _create_model(self) -> nn.Module:
+    def create_model(self) -> nn.Module:
         """
         Create a new model instance using the provided creation strategy.
         """
@@ -80,7 +82,7 @@ class ModelManager:
             A PyTorch model, either newly initialized or loaded from saved weights
         """
         # Create new model instance
-        model = self._create_model()
+        model = self.create_model()
         
         # Load saved weights if available and desired
         if not self.from_scratch:

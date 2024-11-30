@@ -90,7 +90,7 @@ class TestModelManager(unittest.TestCase):
             hidden_size=self.hidden_size
         )
         
-        model = self._track_model(manager._create_model())
+        model = self._track_model(manager.create_model())
         self.assertIsInstance(model, SimpleTestModel)
         self.assertEqual(model.layer.in_features, self.input_size)
         self.assertEqual(model.layer.out_features, self.hidden_size)
@@ -99,12 +99,12 @@ class TestModelManager(unittest.TestCase):
         """Test model creation using various approaches."""
         # Test with constructor
         manager1 = ModelManager(SimpleTestModel, base_dir=self.test_dir)
-        model1 = self._track_model(manager1._create_model())
+        model1 = self._track_model(manager1.create_model())
         self.assertIsInstance(model1, SimpleTestModel)
         
         # Test with factory function
         manager2 = ModelManager(self.model_factory, base_dir=self.test_dir)
-        model2 = self._track_model(manager2._create_model())
+        model2 = self._track_model(manager2.create_model())
         self.assertIsInstance(model2, SimpleTestModel)
         
         # Test with lambda
@@ -112,7 +112,7 @@ class TestModelManager(unittest.TestCase):
             lambda: SimpleTestModel(15, 7),
             base_dir=self.test_dir
         )
-        model3 = self._track_model(manager3._create_model())
+        model3 = self._track_model(manager3.create_model())
         self.assertIsInstance(model3, SimpleTestModel)
         self.assertEqual(model3.layer.in_features, 15)
         self.assertEqual(model3.layer.out_features, 7)
@@ -122,7 +122,7 @@ class TestModelManager(unittest.TestCase):
         manager = ModelManager(SimpleTestModel, base_dir=self.test_dir)
         
         # Create and save a model
-        original_model = self._track_model(manager._create_model())
+        original_model = self._track_model(manager.create_model())
         original_state = original_model.state_dict()
         manager.save_model(original_model, version=1)
         
@@ -141,7 +141,7 @@ class TestModelManager(unittest.TestCase):
     def test_get_last_model_path(self):
         """Test finding the most recent model file."""
         manager = ModelManager(SimpleTestModel, base_dir=self.test_dir)
-        model = self._track_model(manager._create_model())
+        model = self._track_model(manager.create_model())
         
         # Save multiple versions with delays
         for version in range(1, 4):
@@ -155,7 +155,7 @@ class TestModelManager(unittest.TestCase):
         """Test that from_scratch flag prevents loading saved weights."""
         # Create and save initial model
         manager = ModelManager(SimpleTestModel, base_dir=self.test_dir)
-        original_model = self._track_model(manager._create_model())
+        original_model = self._track_model(manager.create_model())
         manager.save_model(original_model, version=1)
         original_state = original_model.state_dict()
         
@@ -192,7 +192,7 @@ class TestModelManager(unittest.TestCase):
     def test_version_directory_structure(self):
         """Test that version directories are created correctly."""
         manager = ModelManager(SimpleTestModel, base_dir=self.test_dir)
-        model = self._track_model(manager._create_model())
+        model = self._track_model(manager.create_model())
         
         for version in [1, 5, 10]:
             manager.save_model(model, version=version)
