@@ -174,7 +174,7 @@ def main():
     sensor_positions = distribute_sensors(args.num_sensors, x_range, y_range)
 
     config = SimulationConfiguration(
-        duration=args.duration,
+        duration=1000000000,
         execution_logging=False
     )
     builder = SimulationBuilder(config)
@@ -193,12 +193,14 @@ def main():
     # Initialize sensor nodes
     sensor_ids = []
     sensor_id = 0
+    trainers = []
     for pos in sensor_positions:
         federated_trainer = FederatedLearningTrainer(
             sensor_id,
             model_manager,
             dataset_loader
         )
+        trainers.append(federated_trainer)
         sensor_protocol = create_protocol_with_params(SimpleSensorProtocol, 
          federated_learning_trainer=federated_trainer,
          success_rate=args.success_rate)
@@ -248,7 +250,15 @@ def main():
             "z": sensor_position[2],
         })
 
-    while simulation.step_simulation():
+    keep_going = True
+    while simulation.step_simulation() and keep_going:
+        if all(t.training_cycles >= 1000 for t in trainers):
+            keep_going = False
+            for trainer in trainers:
+                trainer.stop_training()
+            simulation._finalize_simulation()
+            break
+  
         current_time = simulation._current_timestamp
         for leader_id in leader_ids:
             leader_position = simulation.get_node(leader_id).position
