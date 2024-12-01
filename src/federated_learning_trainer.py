@@ -2,14 +2,19 @@ import threading
 import torch
 import torch.nn as nn
 import logging
+import time
 from model_manager import ModelManager
 from dataset_loader import DatasetLoader
+from metrics_logger import MetricsLogger
 import torch.optim as optim
 from tqdm import tqdm
 from io import BytesIO
 import torch.quantization as quant
-from torch.utils.tensorboard import SummaryWriter
 import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Assume MetricsLogger and plotting functions are imported or defined above
 
 class FederatedLearningTrainer:
     """
@@ -22,9 +27,9 @@ class FederatedLearningTrainer:
         id,
         model_manager: ModelManager,
         dataset_loader: DatasetLoader,
+        metrics_logger: MetricsLogger,
         device=None,
-        start_thread=True,
-        output_dir='runs'
+        start_thread=True
     ):
         """
         Initializes the FederatedLearningTrainer.
@@ -35,11 +40,12 @@ class FederatedLearningTrainer:
             dataset_loader (DatasetLoader): An instance of DatasetLoader to handle data loading.
             device (torch.device, optional): The device to run the training on. Defaults to CUDA if available.
             start_thread (bool, optional): Whether to start the training thread upon initialization.
-            output_dir (str, optional): Directory to save TensorBoard logs.
+            output_dir (str, optional): Directory to save logs and outputs.
         """
         self.id = id
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_manager = model_manager
+        self.start_time = time.time()
 
         # Load the dataset for the client
         self.dataset_loader = dataset_loader
@@ -60,26 +66,8 @@ class FederatedLearningTrainer:
 
         self._log = logging.getLogger(__name__)  # Initialize the logger
 
-        # Initialize metrics storage
-        self.metrics = {
-            'staleness': [],
-            'losses': {
-                'reconstruction': [],
-                'classification': []
-            },
-            'model_sizes': {
-                'non_quantized': [],
-                'quantized': []
-            },
-            'accuracy': [],
-            'global_steps': []
-        }
-
-        self.output_dir = os.path.join(output_dir, f"client_{self.id}")
-        os.makedirs(self.output_dir, exist_ok=True)
-
-        # Initialize TensorBoard SummaryWriter (will write at the end)
-        self.writer = SummaryWriter(log_dir=self.output_dir)
+        # Initialize MetricsLogger
+        self.metrics_logger = metrics_logger
 
         if start_thread:
             # Start the training thread
@@ -94,7 +82,6 @@ class FederatedLearningTrainer:
             state (dict): The state dictionary of the new global model.
             new_version (int): The version number of the new global model.
         """
-
         self.global_model.load_state_dict(state)
         self.global_model_changed = True
         self.model_updates += 1
@@ -130,9 +117,9 @@ class FederatedLearningTrainer:
         self._log.info(f"Client {self.id}: Non-quantized model size: {non_quantized_size} bytes")
         self._log.info(f"Client {self.id}: Quantized model size: {quantized_size} bytes")
 
-        # Accumulate model sizes
-        self.metrics['model_sizes']['non_quantized'].append((self.training_cycles, non_quantized_size))
-        self.metrics['model_sizes']['quantized'].append((self.training_cycles, quantized_size))
+        # Register model sizes
+        self.metrics_logger.register_model_size('non_quantized', self.training_cycles, non_quantized_size)
+        self.metrics_logger.register_model_size('quantized', self.training_cycles, quantized_size)
 
     def get_model_size(self, model):
         """
@@ -149,6 +136,9 @@ class FederatedLearningTrainer:
         size = len(buffer.getvalue())
         buffer.close()
         return size
+    
+    def stop_training(self):
+        self.finished = True
 
     def stop(self):
         """
@@ -175,11 +165,8 @@ class FederatedLearningTrainer:
             self.loader._iterator = None  # Break reference cycle if any
         del self.loader  # Remove data loader to free memory
 
-        # Write accumulated metrics to TensorBoard
-        self.write_metrics_to_tensorboard()
-
-        # Close the TensorBoard writer
-        self.writer.close()
+        # Flush metrics (write to TensorBoard and generate plots)
+        self.metrics_logger.flush()
 
         self._log.info(f"Client {self.id}: Resources have been cleaned up.")
 
@@ -358,14 +345,14 @@ class FederatedLearningTrainer:
                 del images, labels, outputs, predicted
 
         accuracy = 100 * correct / total
-        self.metrics['accuracy'].append((self.training_cycles, accuracy))
+        self.metrics_logger.register_accuracy(self.training_cycles, accuracy)
         self._log.info(f"Client {self.id}: Evaluation Accuracy: {accuracy}%")
         del test_loader
 
     def finalize_training(self, local_model):
         """
         Finalizes the training by converting the model to a quantized version,
-        saving the state for uploading, and evaluating the model.
+        saving the state for uploading.
 
         Args:
             local_model (nn.Module): The trained local model.
@@ -384,9 +371,6 @@ class FederatedLearningTrainer:
         self.model_updated = True  # Flag that the model has been updated
 
         self._log.info(f"Client {self.id}: Local model updated and ready for aggregation.")
-
-    def stop_training(self):
-        self.finished = True
 
     def train(self, epochs=1):
         """
@@ -429,49 +413,27 @@ class FederatedLearningTrainer:
             # Accumulate average losses and global step
             average_reconstruction_loss = running_reconstruction_loss / len(self.loader)
             average_classification_loss = running_classification_loss / len(self.loader)
-            self.metrics['losses']['reconstruction'].append((self.training_cycles, average_reconstruction_loss))
-            self.metrics['losses']['classification'].append((self.training_cycles, average_classification_loss))
-            self.metrics['global_steps'].append(self.training_cycles)
+
+            self.metrics_logger.register_loss('reconstruction', self.training_cycles, average_reconstruction_loss)
+            self.metrics_logger.register_loss('classification', self.training_cycles, average_classification_loss)
+            self.metrics_logger.register_global_step(self.training_cycles)
 
             self._log.info(f"Client {self.id}: Completed training cycle {self.training_cycles}.")
 
             if self.finished:
                 return
-            
+
             # Finalize training
             self.finalize_training(local_model)
 
-             # Calculate staleness before updating the version
+            # Calculate staleness before updating the version
+            current_timestamp = time.time()
+            elapsed_time = current_timestamp - self.start_time
             staleness = self.global_model_version - current_version
-            self.metrics['staleness'].append((self.model_updates, staleness))
-
+            self.metrics_logger.register_staleness(self.model_updates, staleness, timestamp=elapsed_time)
 
             # Clean up
             del local_model, criterion_reconstruction, criterion_classification, optimizer, scheduler
 
         except Exception as e:
             self._log.error(f"Error in client {self.id}: {e}", exc_info=True)
-
-    def write_metrics_to_tensorboard(self):
-        """
-        Writes the accumulated metrics to TensorBoard logs.
-        """
-        for step, loss in self.metrics['losses']['reconstruction']:
-            self.writer.add_scalar('Loss/Reconstruction', loss, step)
-
-        for step, loss in self.metrics['losses']['classification']:
-            self.writer.add_scalar('Loss/Classification', loss, step)
-
-        for step, accuracy in self.metrics['accuracy']:
-            self.writer.add_scalar('Accuracy', accuracy, step)
-
-        for step, size in self.metrics['model_sizes']['non_quantized']:
-            self.writer.add_scalar('Model/Size_NonQuantized', size, step)
-
-        for step, size in self.metrics['model_sizes']['quantized']:
-            self.writer.add_scalar('Model/Size_Quantized', size, step)
-
-        for update_number, staleness in self.metrics['staleness']:
-            self.writer.add_scalar('Model/Staleness', staleness, update_number)
-
-        self._log.info(f"Client {self.id}: Metrics have been written to TensorBoard logs.")

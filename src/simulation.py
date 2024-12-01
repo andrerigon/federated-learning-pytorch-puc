@@ -7,6 +7,7 @@ from gradysim.simulator.handler.visualization import VisualizationHandler, Visua
 from gradysim.simulator.simulation import SimulationBuilder, SimulationConfiguration
 from uav_protocol import SimpleUAVProtocol
 from sensor_protocol import SimpleSensorProtocol
+from metrics_logger import MetricsLogger
 import random
 from sklearn.cluster import KMeans
 import numpy as np
@@ -157,7 +158,7 @@ def plot_path(positions, sensor_positions, output_dir):
 def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Federated Learning with Autoencoders on CIFAR-10')
-    parser.add_argument('--duration', type=int, default=5000, help='Duration')
+    parser.add_argument('--training_cycles', type=int, default=10, help='Training cycles')
     parser.add_argument('--mode', type=str, default='autoencoder', choices=['autoencoder', 'supervisioned'], help='Training mode')
     parser.add_argument('--from_scratch', action='store_true', help='Start training from scratch without loading a pre-trained model')
     parser.add_argument('--resume', dest='from_scratch', action='store_false', help='Do not start from scratch, use pre-trained model')
@@ -174,7 +175,6 @@ def main():
     sensor_positions = distribute_sensors(args.num_sensors, x_range, y_range)
 
     config = SimulationConfiguration(
-        duration=1000000000,
         execution_logging=False
     )
     builder = SimulationBuilder(config)
@@ -195,10 +195,15 @@ def main():
     sensor_id = 0
     trainers = []
     for pos in sensor_positions:
+        output_dir = os.path.join('./runs', f"client_{sensor_id}")
+        os.makedirs(output_dir, exist_ok=True)
+        metrics = MetricsLogger(client_id=sensor_id, output_dir=output_dir)    
+
         federated_trainer = FederatedLearningTrainer(
             sensor_id,
             model_manager,
-            dataset_loader
+            dataset_loader,
+            metrics
         )
         trainers.append(federated_trainer)
         sensor_protocol = create_protocol_with_params(SimpleSensorProtocol, 
@@ -251,8 +256,9 @@ def main():
         })
 
     keep_going = True
+    training_cycles = args.training_cycles
     while simulation.step_simulation() and keep_going:
-        if all(t.training_cycles >= 1000 for t in trainers):
+        if all(t.training_cycles >= training_cycles for t in trainers):
             keep_going = False
             for trainer in trainers:
                 trainer.stop_training()
