@@ -100,7 +100,7 @@ def decompress_and_deserialize_state_dict(serialized_state_dict: str) -> Dict[st
     buffer.seek(0)
     
     # Load back into PyTorch state dict
-    result = torch.load(buffer)
+    result = torch.load(buffer, weights_only=True)
     
     # Clean up to prevent memory leaks
     del compressed_data, buffer, compressed_buffer

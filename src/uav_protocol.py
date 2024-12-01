@@ -48,7 +48,7 @@ def decompress_and_deserialize_state_dict(serialized_state_dict):
         buffer = BytesIO(f.read())
     buffer.seek(0)
     
-    result = torch.load(buffer)
+    result = torch.load(buffer, weights_only=True)
     del compressed_data, buffer
     return result
 

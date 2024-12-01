@@ -14,8 +14,6 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Assume MetricsLogger and plotting functions are imported or defined above
-
 class FederatedLearningTrainer:
     """
     A class that manages local training for a federated learning client.
@@ -50,21 +48,21 @@ class FederatedLearningTrainer:
         # Load the dataset for the client
         self.dataset_loader = dataset_loader
         self.loader = self.dataset_loader.loader(client_id=self.id)
-        self.testset = self.dataset_loader.testset  # Ensure this is the test dataset
+        self.testset = self.dataset_loader.testset
 
         # Load the global model
         self.global_model = self.model_manager.load_model()
 
         # Initialize training parameters
-        self.training_cycles = 0  # Number of completed training cycles
-        self.model_updates = 0    # Number of model updates received
-        self.global_model_version = 0  # Version of the global model
-        self.global_model_changed = False  # Flag indicating if the global model has changed
+        self.training_cycles = 0
+        self.model_updates = 0
+        self.global_model_version = 0
+        self.global_model_changed = False
 
-        self.finished = False       # Flag to signal training termination
-        self.model_updated = False  # Flag indicating if the local model has been updated
+        self.finished = False
+        self.model_updated = False
 
-        self._log = logging.getLogger(__name__)  # Initialize the logger
+        self._log = logging.getLogger(__name__)
 
         # Initialize MetricsLogger
         self.metrics_logger = metrics_logger
@@ -155,10 +153,9 @@ class FederatedLearningTrainer:
         else:
             self._log.warning(f"Client {self.id}: No local model available for evaluation.")
 
-        # Ensure all torch resources are freed
-        torch.cuda.empty_cache()  # Clear CUDA memory if using GPU
-        self.global_model.cpu()   # Move model to CPU to free GPU memory
-        del self.global_model     # Remove model to free memory
+        torch.cuda.empty_cache()
+        self.global_model.cpu()
+        del self.global_model
 
         # Clean up the data loader
         if hasattr(self.loader, '_iterator'):
@@ -221,68 +218,48 @@ class FederatedLearningTrainer:
         return criterion_reconstruction, criterion_classification, optimizer, scheduler
 
     def train_one_batch(self, local_model, inputs, labels, criterion_reconstruction, criterion_classification, optimizer):
-        """
-        Trains the model on a single batch.
+        """Train on a single batch with error handling."""
+        try:
+            optimizer.zero_grad()
 
-        Args:
-            local_model (nn.Module): The model to train.
-            inputs (torch.Tensor): Input data.
-            labels (torch.Tensor): Ground truth labels.
-            criterion_reconstruction (nn.Module): The reconstruction loss function.
-            criterion_classification (nn.Module): The classification loss function.
-            optimizer (torch.optim.Optimizer): The optimizer.
+            # Forward pass
+            decoded, classified = local_model(inputs)
 
-        Returns:
-            Tuple containing:
-                - loss (torch.Tensor): The total loss.
-                - reconstruction_loss_value (float): The reconstruction loss value.
-                - classification_loss_value (float): The classification loss value.
-        """
-        optimizer.zero_grad()
+            # Compute losses
+            reconstruction_loss = criterion_reconstruction(decoded, inputs)
+            classification_loss = criterion_classification(classified, labels)
 
-        # Forward pass
-        decoded, classified = local_model(inputs)
+            # Total loss
+            loss = reconstruction_loss + classification_loss
 
-        # Compute losses
-        reconstruction_loss = criterion_reconstruction(decoded, inputs)
-        classification_loss = criterion_classification(classified, labels)
+            # Backward pass and optimization
+            loss.backward()
+            optimizer.step()
 
-        # Total loss
-        loss = reconstruction_loss + classification_loss
+            # Detach losses for logging
+            reconstruction_loss_value = reconstruction_loss.item()
+            classification_loss_value = classification_loss.item()
 
-        # Backward pass and optimization
-        loss.backward()
-        optimizer.step()
+            # Ensure we don't keep unnecessary graph history
+            decoded = decoded.detach()
+            classified = classified.detach()
 
-        # Detach losses for logging
-        reconstruction_loss_value = reconstruction_loss.item()
-        classification_loss_value = classification_loss.item()
-
-        # Release memory
-        del decoded, classified, reconstruction_loss, classification_loss
-
-        return loss, reconstruction_loss_value, classification_loss_value
+            return loss, reconstruction_loss_value, classification_loss_value, decoded, classified
+        
+        except Exception as e:
+            self._log.error(f"Error in train_one_batch: {str(e)}", exc_info=True)
+            raise  # Re-raise the exception after logging
 
     def train_one_epoch(self, local_model, criterion_reconstruction, criterion_classification, optimizer, scheduler):
-        """
-        Trains the model for one epoch.
-
-        Args:
-            local_model (nn.Module): The model to train.
-            criterion_reconstruction (nn.Module): The reconstruction loss function.
-            criterion_classification (nn.Module): The classification loss function.
-            optimizer (torch.optim.Optimizer): The optimizer.
-            scheduler (torch.optim.lr_scheduler._LRScheduler): The learning rate scheduler.
-
-        Returns:
-            Tuple containing:
-                - running_reconstruction_loss (float)
-                - running_classification_loss (float)
-        """
         running_reconstruction_loss = 0.0
         running_classification_loss = 0.0
+        
+        # Only store metrics every N batches
+        visualization_frequency = 10  # Adjust this value as needed
+        batch_predictions = []
+        batch_labels = []
+        batch_embeddings = []
 
-        # Create a progress bar for monitoring
         progress_bar = tqdm(
             enumerate(self.loader, 0),
             total=len(self.loader),
@@ -293,42 +270,85 @@ class FederatedLearningTrainer:
         for i, data in progress_bar:
             if self.finished:
                 self._log.info(f"Client {self.id}: Training has been stopped.")
-                break  # Exit if training is stopped
+                break
 
-            inputs, labels = data[0].to(self.device), data[1].to(self.device)
+            try:
+                inputs, labels = data[0].to(self.device), data[1].to(self.device)
 
-            loss, reconstruction_loss_value, classification_loss_value = self.train_one_batch(
-                local_model,
-                inputs,
-                labels,
-                criterion_reconstruction,
-                criterion_classification,
-                optimizer
-            )
+                loss, reconstruction_loss_value, classification_loss_value, decoded, classified = self.train_one_batch(
+                    local_model,
+                    inputs,
+                    labels,
+                    criterion_reconstruction,
+                    criterion_classification,
+                    optimizer
+                )
 
-            # Update running losses
-            running_reconstruction_loss += reconstruction_loss_value
-            running_classification_loss += classification_loss_value
-            progress_bar.set_postfix(
-                reconstruction_loss=running_reconstruction_loss / (i + 1),
-                classification_loss=running_classification_loss / (i + 1)
-            )
+                running_reconstruction_loss += reconstruction_loss_value
+                running_classification_loss += classification_loss_value
 
-            # Release batch memory
-            del inputs, labels, loss
+                # Only collect visualization data periodically
+                if i % visualization_frequency == 0:
+                    with torch.no_grad():
+                        _, predictions = torch.max(classified.data, 1)
+                        # Use the encoder output we already have from decoded
+                        encoded = decoded.flatten(1)  # Reuse existing tensor
+
+                        # Store in batches instead of extending lists
+                        batch_predictions.append(predictions.cpu())
+                        batch_labels.append(labels.cpu())
+                        batch_embeddings.append(encoded.cpu())
+
+                        # Register MSE less frequently
+                        self.metrics_logger.register_mse_per_sample(
+                            self.training_cycles, 
+                            decoded,
+                            inputs
+                        )
+
+                progress_bar.set_postfix(
+                    reconstruction_loss=running_reconstruction_loss / (i + 1),
+                    classification_loss=running_classification_loss / (i + 1)
+                )
+
+            except Exception as batch_error:
+                self._log.error(f"Error processing batch {i}: {str(batch_error)}", exc_info=True)
+                continue
+            
+            finally:
+                # Clean up tensor references
+                if 'inputs' in locals(): del inputs
+                if 'labels' in locals(): del labels
+                if 'loss' in locals(): del loss
+                if 'decoded' in locals(): del decoded
+                if 'classified' in locals(): del classified
+
+        # Process collected visualization data at the end of epoch
+        if batch_predictions:
+            try:
+                predictions_tensor = torch.cat(batch_predictions)
+                labels_tensor = torch.cat(batch_labels)
+                embeddings_tensor = torch.cat(batch_embeddings)
+
+                # Register predictions and embeddings for visualization
+                self.metrics_logger.register_predictions(
+                    self.training_cycles,
+                    predictions_tensor,
+                    labels_tensor,
+                    embeddings_tensor
+                )
+            except Exception as viz_error:
+                self._log.error(f"Error creating visualizations: {str(viz_error)}", exc_info=True)
 
         # Adjust learning rate
         scheduler.step(running_reconstruction_loss / len(self.loader))
 
+        if self.training_cycles % 10 == 0:
+            self.evaluate_model(self.local_model)
+
         return running_reconstruction_loss, running_classification_loss
-
+   
     def evaluate_model(self, model):
-        """
-        Evaluates the given model on the test dataset and accumulates accuracy.
-
-        Args:
-            model (nn.Module): The model to evaluate.
-        """
         model.eval()
         correct = 0
         total = 0
@@ -350,55 +370,37 @@ class FederatedLearningTrainer:
         del test_loader
 
     def finalize_training(self, local_model):
-        """
-        Finalizes the training by converting the model to a quantized version,
-        saving the state for uploading.
-
-        Args:
-            local_model (nn.Module): The trained local model.
-        """
-
-        # Set model to evaluation mode
         local_model.eval()
-        # Log model sizes
         self.log_model_sizes(local_model)
 
-        # Convert the model to a quantized version
         local_model = torch.quantization.convert(local_model, mapping={'classifier': torch.nn.Identity})
 
-        # Save the current state for uploading to the server
         self.current_state = local_model.state_dict()
-        self.model_updated = True  # Flag that the model has been updated
+        self.model_updated = True
 
         self._log.info(f"Client {self.id}: Local model updated and ready for aggregation.")
 
     def train(self, epochs=1):
-        """
-        Performs local training on the client's data.
-
-        Args:
-            epochs (int, optional): Number of epochs to train. Defaults to 1.
-        """
         torch.backends.quantized.engine = 'qnnpack'
         try:
-            # Prepare the local model
+            # Record start time
+            cycle_start_time = time.time()
+            
             self.local_model = self.prepare_local_model()
             local_model = self.local_model
 
             current_version = self.global_model_version
 
-            # Get loss functions and optimizer
-            criterion_reconstruction, criterion_classification, optimizer, scheduler = self.get_loss_functions_and_optimizer(local_model)
+            criterion_reconstruction, criterion_classification, optimizer, scheduler = \
+                self.get_loss_functions_and_optimizer(local_model)
 
-            # Increment training cycle count
             self.training_cycles += 1
 
             for epoch in range(epochs):
                 if self.finished:
                     self._log.info(f"Client {self.id}: Training has been stopped.")
-                    break  # Exit if training is stopped
+                    break
 
-                # Train for one epoch
                 running_reconstruction_loss, running_classification_loss = self.train_one_epoch(
                     local_model,
                     criterion_reconstruction,
@@ -408,9 +410,16 @@ class FederatedLearningTrainer:
                 )
 
                 if self.finished:
-                    break  # Exit if training is stopped
+                    break
 
-            # Accumulate average losses and global step
+            # Generate TSNE visualization
+            self.metrics_logger.log_tsne_visualization(self.training_cycles)
+
+            # Record cycle duration
+            cycle_duration = time.time() - cycle_start_time
+            self.metrics_logger.register_training_time(self.training_cycles, cycle_duration)
+
+            # Calculate and log average losses
             average_reconstruction_loss = running_reconstruction_loss / len(self.loader)
             average_classification_loss = running_classification_loss / len(self.loader)
 
@@ -418,21 +427,16 @@ class FederatedLearningTrainer:
             self.metrics_logger.register_loss('classification', self.training_cycles, average_classification_loss)
             self.metrics_logger.register_global_step(self.training_cycles)
 
-            self._log.info(f"Client {self.id}: Completed training cycle {self.training_cycles}.")
-
             if self.finished:
                 return
 
-            # Finalize training
             self.finalize_training(local_model)
 
-            # Calculate staleness before updating the version
             current_timestamp = time.time()
             elapsed_time = current_timestamp - self.start_time
             staleness = self.global_model_version - current_version
             self.metrics_logger.register_staleness(self.model_updates, staleness, timestamp=elapsed_time)
 
-            # Clean up
             del local_model, criterion_reconstruction, criterion_classification, optimizer, scheduler
 
         except Exception as e:
