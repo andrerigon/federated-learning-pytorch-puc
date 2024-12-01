@@ -157,7 +157,7 @@ class SimpleUAVProtocol(IProtocol):
             model = SupervisedModel().to(sup_device)
 
         if model_path and not self.from_scratch:
-            model.load_state_dict(torch.load(model_path))
+            model.load_state_dict(torch.load(model_path, weights_only=True))
             print(f"Model loaded from {model_path}")
         return model
 

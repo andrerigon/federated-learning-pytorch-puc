@@ -89,7 +89,7 @@ class ModelManager:
             model_path = self.get_last_model_path()
             if model_path:
                 try:
-                    model.load_state_dict(torch.load(model_path))
+                    model.load_state_dict(torch.load(model_path, weights_only=True))
                     print(f"Model loaded from {model_path}")
                 except Exception as e:
                     print(f"Failed to load model from {model_path}: {e}")
