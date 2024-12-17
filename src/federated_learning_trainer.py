@@ -27,7 +27,8 @@ class FederatedLearningTrainer:
         dataset_loader: DatasetLoader,
         metrics_logger: MetricsLogger,
         device=None,
-        start_thread=True
+        start_thread=True,
+        synchronous=False
     ):
         """
         Initializes the FederatedLearningTrainer.
@@ -44,6 +45,8 @@ class FederatedLearningTrainer:
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_manager = model_manager
         self.start_time = time.time()
+        self.local_model_version = 0
+        self.synchronous = synchronous
 
         # Load the dataset for the client
         self.dataset_loader = dataset_loader
@@ -101,7 +104,17 @@ class FederatedLearningTrainer:
         It continues training until self.finished is set to True.
         """
         while not self.finished:
-            self.train()
+            if self.should_train():
+                self.global_model_changed = False
+                self.train()
+            else:
+                time.sleep(1)    
+
+    def should_train(self):
+       if not self.synchronous:
+           return True 
+       
+       return self.local_model_version == 0 or self.global_model_changed
 
     def log_model_sizes(self, model):
         """
@@ -263,7 +276,7 @@ class FederatedLearningTrainer:
         progress_bar = tqdm(
             enumerate(self.loader, 0),
             total=len(self.loader),
-            desc=f'Client {self.id+1}, Training Cycle {self.training_cycles}',
+            desc=f'S[{self.id+1}], # {self.training_cycles}',
             leave=False
         )
 
@@ -372,7 +385,7 @@ class FederatedLearningTrainer:
     def finalize_training(self, local_model):
         local_model.eval()
         self.log_model_sizes(local_model)
-
+        self.local_model_version += 1
         local_model = torch.quantization.convert(local_model, mapping={'classifier': torch.nn.Identity})
 
         self.current_state = local_model.state_dict()
@@ -381,6 +394,7 @@ class FederatedLearningTrainer:
         self._log.info(f"Client {self.id}: Local model updated and ready for aggregation.")
 
     def train(self, epochs=1):
+        self.global_model_changed = False
         torch.backends.quantized.engine = 'qnnpack'
         try:
             # Record start time

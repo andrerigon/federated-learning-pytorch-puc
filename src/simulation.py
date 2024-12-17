@@ -5,7 +5,8 @@ from gradysim.simulator.handler.mobility import MobilityHandler
 from gradysim.simulator.handler.timer import TimerHandler
 from gradysim.simulator.handler.visualization import VisualizationHandler, VisualizationConfiguration
 from gradysim.simulator.simulation import SimulationBuilder, SimulationConfiguration
-from uav_protocol import SimpleUAVProtocol
+from aggregation_strategy import AlphaWeightedStrategy
+from uav_protocol import SimpleUAVProtocol, AccuracyConvergence
 from sensor_protocol import SimpleSensorProtocol
 from metrics_logger import MetricsLogger
 import random
@@ -23,6 +24,8 @@ from dataset_loader import DatasetLoader
 from model_manager import ModelManager
 from image_classifier_autoencoders import  Autoencoder
 from federated_learning_trainer import FederatedLearningTrainer
+from federated_learning_aggregator import FederatedLearningAggregator
+from aggregation_strategy import FedAvgStrategy, AsyncFedAvgStrategy
 
 def create_protocol_with_params(protocol_class, class_name=None, **init_params):
     """
@@ -193,7 +196,7 @@ def main():
     # Initialize sensor nodes
     sensor_ids = []
     sensor_id = 0
-    trainers = []
+    aggregators = []
     for pos in sensor_positions:
         output_dir = os.path.join('./runs', f"client_{sensor_id}")
         os.makedirs(output_dir, exist_ok=True)
@@ -203,9 +206,10 @@ def main():
             sensor_id,
             model_manager,
             dataset_loader,
-            metrics
+            metrics,
+            synchronous=False
         )
-        trainers.append(federated_trainer)
+        
         sensor_protocol = create_protocol_with_params(SimpleSensorProtocol, 
          federated_learning_trainer=federated_trainer,
          success_rate=args.success_rate)
@@ -218,12 +222,29 @@ def main():
     output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'), args.mode)
     os.makedirs(output_dir, exist_ok=True)
 
+    strategy = AsyncFedAvgStrategy()
+
+    convergence_criteria = AccuracyConvergence(threshold=75, patience=5)
+
     for i in range(args.num_uavs):
-        uav_output_dir = os.path.join(output_dir, f"uav_{len(sensor_ids) + i}")
+        uav_output_dir = os.path.join('./runs', f"client_{sensor_id}")
         os.makedirs(uav_output_dir, exist_ok=True)
+        metrics = MetricsLogger(client_id=sensor_id, output_dir=uav_output_dir)    
+
+        aggregator = FederatedLearningAggregator(
+            sensor_id,
+            model_manager,
+            dataset_loader,
+            metrics,
+            strategy=strategy,
+            convergence_criteria=convergence_criteria,
+            output_dir='./runs',
+            round_interval=30.0
+        )
+        aggregators.append(aggregator)
 
         start_position = mission_lists[i][0]  # Use the first position in the mission list as the start position
-        uav_protocol = create_protocol_with_params(SimpleUAVProtocol, training_mode=args.mode, from_scratch=args.from_scratch, uav_id=i + 1, mission_list=mission_lists[i], output_dir=uav_output_dir)
+        uav_protocol = create_protocol_with_params(SimpleUAVProtocol, aggregator=aggregator , mission_list=mission_lists[i], output_dir=uav_output_dir)
         leader_ids.append(builder.add_node(uav_protocol, start_position))
     
     # Add handlers as before
@@ -256,12 +277,10 @@ def main():
         })
 
     keep_going = True
-    training_cycles = args.training_cycles
+    # training_cycles = args.training_cycles
     while simulation.step_simulation() and keep_going:
-        if all(t.training_cycles >= training_cycles for t in trainers):
+        if all(t.converged for t in aggregators):
             keep_going = False
-            for trainer in trainers:
-                trainer.stop_training()
             simulation._finalize_simulation()
             break
   

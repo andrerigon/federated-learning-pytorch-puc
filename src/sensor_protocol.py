@@ -43,8 +43,6 @@ class SimpleSensorProtocol(IProtocol):
 
     def handle_packet(self, message: str) -> None:
         simple_message: SimpleMessage = json.loads(message)
-
-        self._log.info(simple_message)
         
         # If the message is from a UAV
         if simple_message['sender_type'] == SimpleSender.UAV.value:
@@ -64,11 +62,11 @@ class SimpleSensorProtocol(IProtocol):
             # If it's a ping and the local model is updated
             elif simple_message['type'] == 'ping' and self.federated_learning_trainer.model_updated:
                 new_version = simple_message.get('global_model_version', 0)
-                if new_version <= self.federated_learning_trainer.last_version():
-                    # Discard the message
-                    self._log.info(f"Sensor {self.id}: Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
-                    return  # Exit without processing
-                self._log.info(f"Sensor {self.id}: Responding to ping from UAV {simple_message['sender']}")
+                # if new_version <= self.federated_learning_trainer.last_version():
+                #     # Discard the message
+                #     print(f"Sensor {self.id}: Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
+                #     return  # Exit without processing
+                print(f"Sensor {self.id}: Responding to ping from UAV {simple_message['sender']}")
                 response: SimpleMessage = {
                     'payload': serialize_state_dict(self.federated_learning_trainer.current_state),
                     'sender': self.id,
@@ -83,6 +81,7 @@ class SimpleSensorProtocol(IProtocol):
                 command = SendMessageCommand(json.dumps(response), simple_message['sender'])
                 self.communicator.send_message(command, self.provider)
                 self.packet_count += 1
+                self.federated_learning_trainer.model_updated = False
                 del command, response
         del simple_message, message
         # gc.collect() 
