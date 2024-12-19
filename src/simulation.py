@@ -25,7 +25,7 @@ from model_manager import ModelManager
 from image_classifier_autoencoders import  Autoencoder
 from federated_learning_trainer import FederatedLearningTrainer
 from federated_learning_aggregator import FederatedLearningAggregator
-from aggregation_strategy import FedAvgStrategy, AsyncFedAvgStrategy
+from aggregation_strategy import FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy
 
 def create_protocol_with_params(protocol_class, class_name=None, **init_params):
     """
@@ -207,7 +207,7 @@ def main():
             model_manager,
             dataset_loader,
             metrics,
-            synchronous=False
+            synchronous=True
         )
         
         sensor_protocol = create_protocol_with_params(SimpleSensorProtocol, 
@@ -222,9 +222,9 @@ def main():
     output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'), args.mode)
     os.makedirs(output_dir, exist_ok=True)
 
-    strategy = AsyncFedAvgStrategy()
+    strategy = FedAvgStrategy()
 
-    convergence_criteria = AccuracyConvergence(threshold=75, patience=5)
+    convergence_criteria = AccuracyConvergence(threshold=70, patience=5)
 
     for i in range(args.num_uavs):
         uav_output_dir = os.path.join('./runs', f"client_{sensor_id}")
