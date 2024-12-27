@@ -58,8 +58,8 @@ class DatasetLoader:
     def loader(self, 
                client_id: int,
                batch_size: int = 32,
-               shuffle: bool = True,
-               num_workers: int = 4,
+               shuffle: bool = False,
+               num_workers: int = 0,
                persistent_workers: bool = True,
                pin_memory: bool = False) -> DataLoader:
         """

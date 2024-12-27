@@ -158,6 +158,17 @@ def plot_path(positions, sensor_positions, output_dir):
     # Salvando o gráfico
     plt.savefig(path)
 
+
+# Mapping strategy names to their classes
+STRATEGY_MAP = {
+    "FedAvgStrategy": FedAvgStrategy,
+    "AsyncFedAvgStrategy": AsyncFedAvgStrategy,
+    "RELAYStrategy": RELAYStrategy,
+    "SAFAStrategy": SAFAStrategy,
+    "AstraeaStrategy": AstraeaStrategy,
+    "TimeWeightedStrategy": TimeWeightedStrategy,
+}    
+
 def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Federated Learning with Autoencoders on CIFAR-10')
@@ -168,13 +179,36 @@ def main():
     parser.add_argument('--success_rate', type=float, default=1.0, help='Communication success rate (0.0 to 1.0)')
     parser.add_argument('--num_uavs', type=int, default=1, help='Number of UAVs in the simulation')
     parser.add_argument('--num_sensors', type=int, default=4, help='Number of sensors to deploy')
+    parser.add_argument('--target_accuracy', type=float, default=50, help='Target accuracy')
+    parser.add_argument('--transmision_range', type=float, default=30, help='Device transmission range')
+    parser.add_argument('--grid_size', type=float, default=200, help='Gride side size')
+    parser.add_argument(
+        "--strategy",
+        type=str,
+        choices=STRATEGY_MAP.keys(),
+        required=True,
+        help="Name of the strategy to use (e.g., FedAvgStrategy, SAFAStrategy).",
+    )
 
     args = parser.parse_args()
     print(f"Args: {args}")
 
+    # Parse the strategy name from command-line arguments
+    strategy_name = args.strategy
+    
+    # Get the corresponding strategy class
+    strategy_class = STRATEGY_MAP[strategy_name]
+    
+    # Instantiate the strategy
+    strategy = strategy_class()
+    
+    # Check if training is synchronous
+    is_synchronous = strategy_name == "FedAvgStrategy"
+
     # Distribute sensors randomly in the area within x and y range (-200, 200)
-    x_range = (-200, 200)
-    y_range = (-200, 200)
+    grid_size = args.grid_size
+    x_range = (-grid_size, grid_size)
+    y_range = (-grid_size, grid_size)
     sensor_positions = distribute_sensors(args.num_sensors, x_range, y_range)
 
     config = SimulationConfiguration(
@@ -207,7 +241,7 @@ def main():
             model_manager,
             dataset_loader,
             metrics,
-            synchronous=True
+            synchronous=is_synchronous
         )
         
         sensor_protocol = create_protocol_with_params(SimpleSensorProtocol, 
@@ -222,9 +256,7 @@ def main():
     output_dir = os.path.join('output', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'), args.mode)
     os.makedirs(output_dir, exist_ok=True)
 
-    strategy = FedAvgStrategy()
-
-    convergence_criteria = AccuracyConvergence(threshold=70, patience=5)
+    convergence_criteria = AccuracyConvergence(threshold=args.target_accuracy, patience=5)
 
     for i in range(args.num_uavs):
         uav_output_dir = os.path.join('./runs', f"client_{sensor_id}")
@@ -249,7 +281,7 @@ def main():
     
     # Add handlers as before
     builder.add_handler(TimerHandler())
-    builder.add_handler(CommunicationHandler(CommunicationMedium(transmission_range=30)))
+    builder.add_handler(CommunicationHandler(CommunicationMedium(transmission_range=args.transmision_range)))
     builder.add_handler(MobilityHandler())
     builder.add_handler(VisualizationHandler(VisualizationConfiguration(
         x_range=x_range,
