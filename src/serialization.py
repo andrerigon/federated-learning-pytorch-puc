@@ -15,6 +15,7 @@ import gzip
 import json
 import torch
 from typing import Dict, Any
+from loguru import logger
 
 def serialize_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
     """
@@ -51,7 +52,7 @@ def serialize_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
     compressed_base64 = base64.b64encode(compressed_data).decode('utf-8')
     
     # Log the compressed size for monitoring
-    print(f"Serialized and compressed state_dict size: {len(compressed_data)} bytes")
+    logger.debug(f"Serialized and compressed state_dict size: {len(compressed_data)} bytes")
     
     # Wrap in JSON for additional safety and transmission compatibility
     result = json.dumps(compressed_base64)

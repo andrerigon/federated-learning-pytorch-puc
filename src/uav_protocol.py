@@ -11,6 +11,7 @@ from typing import List, Dict
 from sensor_protocol import SimpleMessage, SimpleSender
 from federated_learning_aggregator import FederatedLearningAggregator
 from serialization import decompress_and_deserialize_state_dict, serialize_state_dict
+from loguru import logger
 
 ######################################################
 # Convergence Criteria
@@ -33,7 +34,7 @@ class AccuracyConvergence(ConvergenceCriteria):
 
     def has_converged(self, metrics_history: List[Dict[str, float]]) -> bool:
         accuracy_values = [m['accuracy'] for m in metrics_history if 'accuracy' in m]
-        print(f"\nLast accuracy: {accuracy_values[-1]} threshold: {self.threshold} result: {accuracy_values[-1] >= self.threshold} last values: {accuracy_values}\n")
+        logger.info(f"Last accuracy: {accuracy_values[-1]} threshold: {self.threshold} result: {accuracy_values[-1] >= self.threshold} last values: {accuracy_values}\n")
         if not accuracy_values:
             return False
         if accuracy_values[-1] >= self.threshold:
@@ -79,10 +80,11 @@ class SimpleUAVProtocol(IProtocol):
         self.message_processing_thread.daemon = True
 
     def initialize(self) -> None:
-        self._log = logging.getLogger()
         self.packet_count = 0
         self.id = self.provider.get_id()
-        self._log.info(f"Starting UAV [{self.id}]")
+
+        self.logger = logger.bind(source="uav", uav_id=self.id)
+        self.logger.info(f"Starting UAV")
 
         mission_config = MissionMobilityConfiguration(loop_mission=LoopMission.RESTART)
         self._mission = MissionMobilityPlugin(self, mission_config)
@@ -125,7 +127,7 @@ class SimpleUAVProtocol(IProtocol):
 
             if message['type'] == 'model_update':
                 sender_type = ("Sensor" if message['sender_type'] == SimpleSender.SENSOR.value else "UAV")
-                self._log.info(f"[UAV {self.id}] Received model update from {sender_type} {sender_id}")
+                self.logger.info(f"Received model update from {sender_type} {sender_id}")
 
                 decompressed_state_dict = decompress_and_deserialize_state_dict(message['payload'])
 
@@ -146,7 +148,7 @@ class SimpleUAVProtocol(IProtocol):
                 self.provider.send_communication_command(command)
 
             elif message['type'] == 'ping':
-                self._log.info(f"[UAV {self.id}] Received ping from {sender_id}")
+                self.logger.info(f"Received ping from {sender_id}")
                 response_message: SimpleMessage = {
                     'sender_type': SimpleSender.UAV.value,
                     'payload': self.aggregator.model_manager.serialize_state_dict(self.aggregator.state_dict()),
@@ -158,12 +160,12 @@ class SimpleUAVProtocol(IProtocol):
                 command = BroadcastMessageCommand(json.dumps(response_message))
                 self.provider.send_communication_command(command)
             else:
-                self._log.warning(f"[UAV {self.id}] Unknown message type from sender {sender_id}")
+                self.logger.warning(f"Unknown message type from sender {sender_id}")
 
         except KeyError as e:
-            self._log.error(f"KeyError: Missing key in message - {e}")
+            self.logger.error(f"KeyError: Missing key in message - {e}")
         except Exception as e:
-            self._log.error(f"Unexpected error: {e}", exc_info=True)
+            self.logger.error(f"Unexpected error: {e}", exc_info=True)
         # gc.collect()
 
     def handle_packet(self, message: str) -> None:
@@ -175,4 +177,4 @@ class SimpleUAVProtocol(IProtocol):
     def finish(self) -> None:
         # Signal aggregator to stop and finalize
         self.aggregator.stop()
-        self._log.info(f"UAV {self.id} finished.")
+        self.logger.info(f"Finished.")

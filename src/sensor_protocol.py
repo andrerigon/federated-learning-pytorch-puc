@@ -1,6 +1,6 @@
 import json
-import logging
 import random
+from loguru import logger
 
 from gradysim.protocol.interface import IProtocol
 from gradysim.protocol.messages.communication import SendMessageCommand
@@ -15,7 +15,6 @@ def report_message(message: SimpleMessage) -> str:
     return ''
 
 class SimpleSensorProtocol(IProtocol):
-    _log: logging.Logger
     packet_count: int
     remaining_energy: int
 
@@ -25,13 +24,14 @@ class SimpleSensorProtocol(IProtocol):
 
     def initialize(self) -> None:
         self.remaining_energy = random.randint(1, 5)
-        self._log = logging.getLogger()
         self.packet_count = 0
         
         self.id = self.provider.get_id()
+        self.logger = logger.bind(source="sensor", sensor_id=self.id)
 
         # Communication Mediator with configurable success rate
         self.communicator = CommunicationMediator[SendMessageCommand](success_rate = self.success_rate)
+        self.logger.info("Started")
     
     def bla(self):
         print(f"\n\nme meg todim todim\n")
@@ -39,7 +39,6 @@ class SimpleSensorProtocol(IProtocol):
     def handle_timer(self, timer: str) -> None:
         pass
         # self._generate_packet()
-
 
     def handle_packet(self, message: str) -> None:
         simple_message: SimpleMessage = json.loads(message)
@@ -51,10 +50,11 @@ class SimpleSensorProtocol(IProtocol):
                 new_version = simple_message.get('global_model_version', 0)
                 if new_version <= self.federated_learning_trainer.global_model_version:
                     # Discard the message
-                    print(f"Sensor {self.id}: Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
+                    self.logger.info(f"Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
                     return  # Exit without processing
+                
                 # Else, process the model update
-                print(f"Sensor {self.id}: Received new model update from UAV {simple_message['sender']} with version {new_version}")
+                self.logger.info(f"Received new model update from UAV {simple_message['sender']} with version {new_version}")
                 state = decompress_and_deserialize_state_dict(simple_message['payload'])
                 self.federated_learning_trainer.update_model(state, new_version)
                 del state
@@ -64,9 +64,9 @@ class SimpleSensorProtocol(IProtocol):
                 new_version = simple_message.get('global_model_version', 0)
                 # if new_version <= self.federated_learning_trainer.last_version():
                 #     # Discard the message
-                #     print(f"Sensor {self.id}: Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
+                #     self.logger.info(f"Sensor {self.id}: Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
                 #     return  # Exit without processing
-                print(f"Sensor {self.id}: Responding to ping from UAV {simple_message['sender']}")
+                self.logger.info(f"Responding to ping from UAV {simple_message['sender']}")
                 response: SimpleMessage = {
                     'payload': serialize_state_dict(self.federated_learning_trainer.current_state),
                     'sender': self.id,
@@ -94,8 +94,8 @@ class SimpleSensorProtocol(IProtocol):
         Clean up resources and terminate any active threads.
         """
         self.federated_learning_trainer.stop()
-        self._log.info(f"Final packet count: {self.packet_count}")
+        self.logger.info(f"Final packet count: {self.packet_count}")
         self.communicator.log_metrics()
 
-        self._log.info("Sensor Protocol finished and cleaned up.")
+        self.logger.info("Sensor Protocol finished and cleaned up.")
 

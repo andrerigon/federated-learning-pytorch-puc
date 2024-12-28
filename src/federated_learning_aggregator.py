@@ -28,6 +28,7 @@ from metrics_logger import MetricsLogger
 from aggregation_strategy import AggregationStrategy, FedAvgStrategy, AsyncFedAvgStrategy, SAFAStrategy
 from image_classifier_autoencoders import device as ae_device
 from uav_metrics_logger import plot_clustering_metrics, plot_confusion_matrix, plot_mse, plot_tsne
+from loguru import logger
 
 class ConvergenceCriteria:
     def has_converged(self, metrics_history: List[Dict[str, float]]) -> bool:
@@ -53,7 +54,8 @@ class FederatedLearningAggregator:
         convergence_criteria: ConvergenceCriteria,
         output_dir: str = './',
         round_interval: float = 60.0,
-        device=None
+        device=None,
+        client_count: int = 10
     ):
         """
         Args:
@@ -77,13 +79,14 @@ class FederatedLearningAggregator:
         self.round_interval = round_interval
         self.converged = False
         self.start_time = time.time()
+        self.client_count = client_count
 
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.global_model = self.model_manager.load_model().to(self.device)
         self.global_model_version = 0
         self.model_updates = 0
-        self._log = logging.getLogger(__name__)
+        self.logger = logger.bind(source="uav", uav_id=self.id)
 
         # For FedAvg: buffer incoming client updates until time triggers aggregation
         self.client_updates_buffer: List[OrderedDict] = []
@@ -105,6 +108,8 @@ class FederatedLearningAggregator:
             f'run_{self.run_timestamp}'
         )
         os.makedirs(self.metrics_path, exist_ok=True)
+
+        self.received_client_ids = set()
 
         # TensorBoard writer
         self.tb_writer = SummaryWriter(
@@ -148,11 +153,19 @@ class FederatedLearningAggregator:
         """Start the evaluation thread."""
         self.evaluation_thread.start()
 
+    def have_all_updates(self):
+        """
+        Check if we've received updates from 10 distinct client IDs.
+        """
+        self.logger.info(f"received_client_ids {len(self.received_client_ids)} ")
+        return len(self.received_client_ids) == self.client_count  
+
     def receive_model_update(self, sender_id: str, client_dict: OrderedDict, local_model_version: int):
         """Called when a client model update arrives."""
         # Calculate staleness
         staleness = self.global_model_version - local_model_version
         
+        self.received_client_ids.add(sender_id)
         # Record metrics
         message_time = time.time()
         self.communication_stats['total_messages'] += 1
@@ -181,16 +194,49 @@ class FederatedLearningAggregator:
         return isinstance(self.strategy, (FedAvgStrategy, SAFAStrategy))
 
     def check_and_aggregate_fedavg(self):
-        """Check if it's time to aggregate for FedAvg/SAFA strategies."""
+        """
+        Check if it's time to aggregate for FedAvg or other strategies.
+        If it's FedAvg, also verify that we have updates from all clients before aggregating.
+        """
         current_time = time.time()
-        if (current_time - self.last_aggregation_time) >= self.round_interval:
-            print("doing fedav/safa aggreg")    
-            updated_state = self.strategy.aggregate(self.global_model, self.client_updates_buffer)
-            self.update_global_model(updated_state)
-            self.client_updates_buffer = []
-            self.last_aggregation_time = current_time
-        else: 
-            print("skipping fedav/safa aggreg")
+            
+            # Check if strategy is FedAvg
+        if self.is_fedavg():
+            # Example: a helper method that checks if we have updates from all clients
+            if self.have_all_updates():
+                self.logger.info("Aggregating FedAvg model (all clients' updates present).")
+                updated_state = self.strategy.aggregate(self.global_model, self.client_updates_buffer)
+                self.update_global_model(updated_state)
+                # Reset buffer and timer
+                self.client_updates_buffer = []
+                self.last_aggregation_time = current_time
+                self.received_client_ids = set()
+            else:
+                self.logger.info("Skipping FedAvg aggregation: not all clients have submitted updates yet.")
+        
+        else:
+            if isinstance(self.strategy, (SAFAStrategy)) and (current_time - self.last_aggregation_time) < self.round_interval:
+                self.logger.info("Skipping aggregation: round interval not reached yet.")
+                return 
+            else:
+                # Handle other strategies (e.g. SAFA) the same as before
+                self.logger.info("Doing non-FedAvg aggregation (e.g., SAFA).")
+                updated_state = self.strategy.aggregate(self.global_model, self.client_updates_buffer)
+                self.update_global_model(updated_state)
+                self.client_updates_buffer = []
+                self.last_aggregation_time = current_time
+                
+    # def check_and_aggregate_fedavg(self):
+    #     """Check if it's time to aggregate for FedAvg/SAFA strategies."""
+    #     current_time = time.time()
+    #     if (current_time - self.last_aggregation_time) >= self.round_interval:
+    #         self.logger.info("doing fedav/safa aggreg")    
+    #         updated_state = self.strategy.aggregate(self.global_model, self.client_updates_buffer)
+    #         self.update_global_model(updated_state)
+    #         self.client_updates_buffer = []
+    #         self.last_aggregation_time = current_time
+    #     else: 
+    #         self.logger.info("skipping fedav/safa aggreg")
 
     def update_global_model(self, state: OrderedDict, new_version: int = None):
         """Updates the global model with a new aggregated state dict."""
@@ -202,18 +248,18 @@ class FederatedLearningAggregator:
         self.model_updates += 1
         self.global_model.eval()
         self.global_model = torch.quantization.convert(self.global_model)
-        self._log.info(f"Aggregator {self.id}: Updated global model to version {new_version}")
+        self.logger.info(f"Updated global model to version {new_version}")
 
     def record_staleness(self, sender_id: str, staleness: int, timestamp: float):
-        """Record detailed staleness metrics."""
         self.staleness_stats['values'].append(staleness)
         self.staleness_stats['timestamps'].append(timestamp)
         self.staleness_stats['max_staleness'] = max(self.staleness_stats['max_staleness'], staleness)
         self.staleness_stats['total_staleness'] += staleness
-        
+
         if sender_id not in self.staleness_stats['by_client']:
-            self.staleness_stats['by_client'][sender_id] = []
-        self.staleness_stats['by_client'][sender_id].append((timestamp, staleness))
+            self.staleness_stats['by_client'][sender_id] = {'staleness': [], 'timestamps': []}
+        self.staleness_stats['by_client'][sender_id]['staleness'].append(staleness)
+        self.staleness_stats['by_client'][sender_id]['timestamps'].append(timestamp)
 
     def state_dict(self):
         return self.global_model.state_dict()
@@ -233,14 +279,14 @@ class FederatedLearningAggregator:
                 self.tb_writer.add_scalar(f'Evaluation/{name}', value, step)
             
             if self.convergence_criteria.has_converged(self.metrics_history):
-                print("\n\nConverged!\n\n")
+                self.logger.info("\n\nConverged!\n\n")
                 self.mode_converged_callback()
                 break
             time.sleep(5)
 
     def evaluate_global_model(self) -> Dict[str, float]:
         """Evaluate the global model on the testset."""
-        testloader = DataLoader(self.testset, batch_size=4, shuffle=False, num_workers=2)
+        testloader = DataLoader(self.testset, batch_size=4, shuffle=False, num_workers=0)
         criterion_reconstruction = nn.MSELoss()
         criterion_classification = nn.CrossEntropyLoss()
         total_reconstruction_loss = 0
@@ -283,76 +329,98 @@ class FederatedLearningAggregator:
 
     def mode_converged_callback(self):
         """Called when the global model has converged."""
-        self._log.info("[Aggregator] Global model converged.")
+        self.logger.info.info("Global model converged.")
         step = len(self.metrics_history)
         self.converged = True
         self.tb_writer.add_text('Convergence', f'Model converged at step {step}', step)
 
     def save_final_metrics(self):
         """Save comprehensive final metrics."""
-        avg_staleness = (np.mean(self.staleness_stats['values']) 
-                        if self.staleness_stats['values'] else 0)
-        success_rate = (self.communication_stats['successful_updates'] / 
-                       self.communication_stats['total_messages']
-                       if self.communication_stats['total_messages'] > 0 else 0)
-        
-        metrics_summary = {
-            'strategy': self.strategy_name,
-            'run_timestamp': self.run_timestamp,
-            'convergence_time': time.time() - self.start_time if self.converged else None,
-            'total_updates': self.model_updates,
-            'performance': {
-                'final_accuracy': self.metrics_history[-1]['accuracy'] if self.metrics_history else None,
-                'peak_accuracy': self.performance_metrics['peak_accuracy'],
-                'final_loss': self.metrics_history[-1]['loss'] if self.metrics_history else None,
-                'training_stability': self.performance_metrics['training_stability']
-            },
-            'communication': {
-                'total_messages': self.communication_stats['total_messages'],
-                'successful_updates': self.communication_stats['successful_updates'],
-                'success_rate': success_rate,
-                'average_model_size': np.mean(self.performance_metrics['model_sizes'])
-            },
-            'staleness': {
-                'average': avg_staleness,
-                'maximum': self.staleness_stats['max_staleness'],
-                'by_client': {
-                    client: {
-                        'average': np.mean([s for _, s in values]),
-                        'max': max(s for _, s in values)
+        try:
+            avg_staleness = (
+                np.mean(self.staleness_stats['values']) 
+                if self.staleness_stats['values'] else 0.0
+            )
+            success_rate = (
+                self.communication_stats['successful_updates'] / self.communication_stats['total_messages']
+                if self.communication_stats['total_messages'] > 0 else 0.0
+            )
+
+            metrics_summary = {
+                'strategy': self.strategy_name,
+                'run_timestamp': self.run_timestamp,
+                'convergence_time': time.time() - self.start_time if self.converged else None,
+                'total_updates': self.model_updates,
+                'performance': {
+                    'final_accuracy': self.metrics_history[-1]['accuracy'] if self.metrics_history else None,
+                    'peak_accuracy': self.performance_metrics['peak_accuracy'],
+                    'final_loss': self.metrics_history[-1]['loss'] if self.metrics_history else None,
+                    'training_stability': self.performance_metrics['training_stability'],
+                },
+                'communication': {
+                    'total_messages': self.communication_stats['total_messages'],
+                    'successful_updates': self.communication_stats['successful_updates'],
+                    'success_rate': success_rate,
+                    'average_model_size': np.mean(self.performance_metrics['model_sizes'])
+                    if self.performance_metrics['model_sizes'] else 0.0,
+                },
+                'staleness': {
+                    'average': avg_staleness,
+                    'maximum': self.staleness_stats['max_staleness'],
+                    'by_client': {
+                        client: {
+                            'average': np.mean(values) if values and all(isinstance(v, (int, float)) for v in values) else 0.0,
+                            'max': max(values) if values and all(isinstance(v, (int, float)) for v in values) else 0.0
+                        }
+                        for client, values in self.staleness_stats['by_client'].items()
                     }
-                    for client, values in self.staleness_stats['by_client'].items()
                 }
             }
-        }
-        
-        # Save metrics to JSON
-        metrics_file = os.path.join(self.metrics_path, 'final_metrics.json')
-        with open(metrics_file, 'w') as f:
-            json.dump(metrics_summary, f, indent=4)
-        
-        # Save model
-        model_file = os.path.join(self.metrics_path, 'final_model.pth')
-        torch.save(self.global_model.state_dict(), model_file)
-        
-        # Save learning curves
-        metrics_df = pd.DataFrame(self.metrics_history)
-        metrics_df.to_csv(os.path.join(self.metrics_path, 'learning_curves.csv'))
-        
-        # Log final hparams to tensorboard
-        self.tb_writer.add_hparams(
-            {
-                'strategy': self.strategy_name,
-                'round_interval': self.round_interval
-            },
-            {
-                'hparam/final_accuracy': metrics_summary['performance']['final_accuracy'],
-                'hparam/convergence_time': metrics_summary['convergence_time'],
-                'hparam/total_updates': metrics_summary['total_updates'],
-                'hparam/avg_staleness': avg_staleness,
-                'hparam/success_rate': success_rate
-            }
-        )
+
+            step = len(self.metrics_history)
+            self.tb_writer.add_scalar('Metrics/FinalAccuracy', metrics_summary['performance']['final_accuracy'], step)
+            self.tb_writer.add_scalar('Metrics/AverageStaleness', avg_staleness, step)
+            self.tb_writer.add_scalar('Metrics/TotalUpdates', metrics_summary['total_updates'], step)
+            self.tb_writer.add_scalar('Metrics/SuccessRate', success_rate, step)
+            self.tb_writer.add_scalar('Metrics/AggregationRounds', self.model_updates, step)
+
+            # Histogram for staleness
+            self.tb_writer.add_histogram('Staleness/Distribution', np.array(self.staleness_stats['values']), step)
+
+            # Per-client staleness
+            for client, stats in self.staleness_stats['by_client'].items():
+                if stats['staleness']:
+                    self.tb_writer.add_scalar(f'Client/{client}/AverageStaleness', np.mean(stats['staleness']), step)
+                    self.tb_writer.add_scalar(f'Client/{client}/MaxStaleness', max(stats['staleness']), step)
+
+            metrics_file = os.path.join(self.metrics_path, 'final_metrics.json')
+            with open(metrics_file, 'w') as f:
+                json.dump(metrics_summary, f, indent=4)
+
+            # Save model
+            model_file = os.path.join(self.metrics_path, 'final_model.pth')
+            torch.save(self.global_model.state_dict(), model_file)
+
+            # Save learning curves
+            metrics_df = pd.DataFrame(self.metrics_history)
+            metrics_df.to_csv(os.path.join(self.metrics_path, 'learning_curves.csv'))
+
+            # Log final hparams to TensorBoard
+            self.tb_writer.add_hparams(
+                {
+                    'strategy': self.strategy_name,
+                    'round_interval': self.round_interval
+                },
+                {
+                    'hparam/final_accuracy': metrics_summary['performance']['final_accuracy'],
+                    'hparam/convergence_time': metrics_summary['convergence_time'],
+                    'hparam/total_updates': metrics_summary['total_updates'],
+                    'hparam/avg_staleness': avg_staleness,
+                    'hparam/success_rate': success_rate
+                }
+            )
+        except Exception as e:
+            self.logger.info.error(f"Error in save_final_metrics: {e}", exc_info=True)
 
     def stop(self):
         """Stop evaluation, cleanup resources, and finalize."""
@@ -366,7 +434,7 @@ class FederatedLearningAggregator:
         del self.global_model
         gc.collect()
 
-        self._log.info(f"Aggregator {self.id}: Stopped and cleaned up.")
+        self.logger.info.info(f"Aggregator {self.id}: Stopped and cleaned up.")
         
         # Close TensorBoard writer
         self.tb_writer.close()

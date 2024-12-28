@@ -13,6 +13,7 @@ import torch.quantization as quant
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
+from loguru import logger
 
 class FederatedLearningTrainer:
     """
@@ -65,7 +66,7 @@ class FederatedLearningTrainer:
         self.finished = False
         self.model_updated = False
 
-        self._log = logging.getLogger(__name__)
+        self.logger = logger.bind(source="sensor", sensor_id=self.id)
 
         # Initialize MetricsLogger
         self.metrics_logger = metrics_logger
@@ -87,7 +88,7 @@ class FederatedLearningTrainer:
         self.global_model_changed = True
         self.model_updates += 1
         self.global_model_version = new_version
-        self._log.info(f"Client {self.id}: Updated global model to version {new_version}")
+        self.logger.info(f"Client {self.id}: Updated global model to version {new_version}")
 
     def last_version(self):
         """
@@ -125,8 +126,8 @@ class FederatedLearningTrainer:
         """
         non_quantized_size = self.get_model_size(model)
         quantized_size = self.get_model_size(torch.quantization.convert(model))
-        self._log.info(f"Client {self.id}: Non-quantized model size: {non_quantized_size} bytes")
-        self._log.info(f"Client {self.id}: Quantized model size: {quantized_size} bytes")
+        self.logger.debug(f"Non-quantized model size: {non_quantized_size} bytes")
+        self.logger.debug(f"Quantized model size: {quantized_size} bytes")
 
         # Register model sizes
         self.metrics_logger.register_model_size('non_quantized', self.training_cycles, non_quantized_size)
@@ -158,13 +159,13 @@ class FederatedLearningTrainer:
         self.finished = True
         if hasattr(self, 'thread') and self.thread.is_alive():
             self.thread.join()
-            self._log.info(f"Client {self.id}: Training thread stopped.")
+            self.logger.info(f"Training thread stopped.")
 
         # Evaluate the local model if it exists
         if hasattr(self, 'local_model'):
             self.evaluate_model(self.local_model)
         else:
-            self._log.warning(f"Client {self.id}: No local model available for evaluation.")
+            self.logger.warning(f"No local model available for evaluation.")
 
         torch.cuda.empty_cache()
         self.global_model.cpu()
@@ -178,7 +179,7 @@ class FederatedLearningTrainer:
         # Flush metrics (write to TensorBoard and generate plots)
         self.metrics_logger.flush()
 
-        self._log.info(f"Client {self.id}: Resources have been cleaned up.")
+        self.logger.info(f"Resources have been cleaned up.")
 
     def prepare_local_model(self):
         """
@@ -260,7 +261,7 @@ class FederatedLearningTrainer:
             return loss, reconstruction_loss_value, classification_loss_value, decoded, classified
         
         except Exception as e:
-            self._log.error(f"Error in train_one_batch: {str(e)}", exc_info=True)
+            self.logger.error(f"Error in train_one_batch: {str(e)}", exc_info=True)
             raise  # Re-raise the exception after logging
 
     def train_one_epoch(self, local_model, criterion_reconstruction, criterion_classification, optimizer, scheduler):
@@ -282,7 +283,7 @@ class FederatedLearningTrainer:
 
         for i, data in progress_bar:
             if self.finished:
-                self._log.info(f"Client {self.id}: Training has been stopped.")
+                self.logger.info(f"Training has been stopped.")
                 break
 
             try:
@@ -325,7 +326,7 @@ class FederatedLearningTrainer:
                 )
 
             except Exception as batch_error:
-                self._log.error(f"Error processing batch {i}: {str(batch_error)}", exc_info=True)
+                self.logger.error(f"Error processing batch {i}: {str(batch_error)}", exc_info=True)
                 continue
             
             finally:
@@ -351,7 +352,7 @@ class FederatedLearningTrainer:
                     embeddings_tensor
                 )
             except Exception as viz_error:
-                self._log.error(f"Error creating visualizations: {str(viz_error)}", exc_info=True)
+                self.logger.error(f"Error creating visualizations: {str(viz_error)}", exc_info=True)
 
         # Adjust learning rate
         scheduler.step(running_reconstruction_loss / len(self.loader))
@@ -366,7 +367,7 @@ class FederatedLearningTrainer:
         correct = 0
         total = 0
 
-        test_loader = torch.utils.data.DataLoader(self.testset, batch_size=64, shuffle=False, num_workers=2)
+        test_loader = torch.utils.data.DataLoader(self.testset, batch_size=64, shuffle=False, num_workers=0)
 
         with torch.no_grad():
             for data in test_loader:
@@ -379,7 +380,7 @@ class FederatedLearningTrainer:
 
         accuracy = 100 * correct / total
         self.metrics_logger.register_accuracy(self.training_cycles, accuracy)
-        self._log.info(f"Client {self.id}: Evaluation Accuracy: {accuracy}%")
+        self.logger.info(f"Evaluation Accuracy: {accuracy}%")
         del test_loader
 
     def finalize_training(self, local_model):
@@ -391,7 +392,7 @@ class FederatedLearningTrainer:
         self.current_state = local_model.state_dict()
         self.model_updated = True
 
-        self._log.info(f"Client {self.id}: Local model updated and ready for aggregation.")
+        self.logger.debug(f"Local model updated and ready for aggregation.")
 
     def train(self, epochs=1):
         self.global_model_changed = False
@@ -412,7 +413,7 @@ class FederatedLearningTrainer:
 
             for epoch in range(epochs):
                 if self.finished:
-                    self._log.info(f"Client {self.id}: Training has been stopped.")
+                    self.logger.info(f"Training has been stopped.")
                     break
 
                 running_reconstruction_loss, running_classification_loss = self.train_one_epoch(
@@ -454,4 +455,4 @@ class FederatedLearningTrainer:
             del local_model, criterion_reconstruction, criterion_classification, optimizer, scheduler
 
         except Exception as e:
-            self._log.error(f"Error in client {self.id}: {e}", exc_info=True)
+            self.logger.error(f"Error in client {self.id}: {e}", exc_info=True)

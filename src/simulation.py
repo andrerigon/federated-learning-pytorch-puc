@@ -19,6 +19,9 @@ import os
 import datetime
 import gc
 import subprocess
+from loguru import logger
+import sys
+from tqdm import tqdm
 
 from dataset_loader import DatasetLoader
 from model_manager import ModelManager
@@ -26,6 +29,42 @@ from image_classifier_autoencoders import  Autoencoder
 from federated_learning_trainer import FederatedLearningTrainer
 from federated_learning_aggregator import FederatedLearningAggregator
 from aggregation_strategy import FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy
+
+
+def custom_format(record):
+    """
+    Build the log line manually, adding [uav_id=..., sensor_id=...]
+    only if they exist in 'record["extra"]', and apply Loguru color tags.
+    """
+    # Basic fields
+    t          = record["time"].strftime("%H:%M:%S")
+    level_name = record["level"].name
+    name       = record["name"]
+    function   = record["function"]
+    line       = record["line"]
+    message    = record["message"]
+
+    # Check for extra fields
+    extra = record["extra"]
+    bracket_parts = []
+    if "uav_id" in extra:
+        bracket_parts.append(f"U[{extra['uav_id']}]")
+    if "sensor_id" in extra:
+        bracket_parts.append(f"S[{extra['sensor_id']}]")
+
+    # Only build bracket string if we have at least one ID
+    bracket_str = ""
+    if bracket_parts:
+        # Example: color the bracket part in <blue>
+        bracket_str = f" <yellow>{', '.join(bracket_parts)}</yellow>"
+
+    # Construct final log line using Loguru color tags
+    log_line = (
+        f"<green>{t}</green> <level>{level_name}</level> "
+        f"<cyan>{name}</cyan>:<magenta>{line}</magenta>{bracket_str} "
+        f"<level>{message}</level>\n"
+    )
+    return log_line
 
 def create_protocol_with_params(protocol_class, class_name=None, **init_params):
     """
@@ -169,6 +208,7 @@ STRATEGY_MAP = {
     "TimeWeightedStrategy": TimeWeightedStrategy,
 }    
 
+@logger.catch
 def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Federated Learning with Autoencoders on CIFAR-10')
@@ -182,6 +222,7 @@ def main():
     parser.add_argument('--target_accuracy', type=float, default=50, help='Target accuracy')
     parser.add_argument('--transmision_range', type=float, default=30, help='Device transmission range')
     parser.add_argument('--grid_size', type=float, default=200, help='Gride side size')
+    parser.add_argument('--tensor_dir', type=str, default="runs", help='Tensor output dir')
     parser.add_argument(
         "--strategy",
         type=str,
@@ -191,7 +232,43 @@ def main():
     )
 
     args = parser.parse_args()
-    print(f"Args: {args}")
+
+    tensor_dir = args.tensor_dir
+
+    # Remove default sink
+    logger.remove()
+
+    # Add console sink
+    logger.add(
+        lambda msg: tqdm.write(msg, end=""),
+        format=custom_format,
+        level="INFO",
+        colorize=True
+    )
+
+    logger.add(
+        f"{tensor_dir}/sensors.log",
+        level="INFO",
+        format=(
+        "<green>{time:HH:mm:ss}</green> "
+        "[<yellow>{extra[sensor_id]}</yellow>] {message}"
+        ),
+        colorize=True,
+        filter=lambda record: record["extra"].get("source") == "sensor"
+    )
+
+    logger.add(
+        f"{tensor_dir}/uavs.log",
+        level="INFO",
+        format=(
+        "<green>{time:HH:mm:ss}</green> "
+        "[<yellow>{extra[uav_id]}</yellow>] {message}"
+        ),
+        colorize=True,
+        filter=lambda record: record["extra"].get("source") == "uav"
+    )
+
+    logger.info(f"Args: {args}")
 
     # Parse the strategy name from command-line arguments
     strategy_name = args.strategy
@@ -221,7 +298,7 @@ def main():
     dataset_loader = DatasetLoader(args.num_sensors)
     model_manager = ModelManager(
             Autoencoder, 
-            from_scratch = args.from_scratch,
+            # from_scratch = args.from_scratch,
             base_dir='output/autoencoder',
             num_classes=10
         )

@@ -100,7 +100,7 @@ class DatasetLoader:
     def test_loader(self, 
                    batch_size: int = 32,
                    shuffle: bool = False,
-                   num_workers: int = 4) -> DataLoader:
+                   num_workers: int = 0) -> DataLoader:
         """
         Create a DataLoader for the test dataset.
         
