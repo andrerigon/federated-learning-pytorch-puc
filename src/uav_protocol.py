@@ -107,9 +107,21 @@ class SimpleUAVProtocol(IProtocol):
         }
         command = BroadcastMessageCommand(json.dumps(message))
         self.provider.send_communication_command(command)
+
+        response_message: SimpleMessage = {
+                    'sender_type': SimpleSender.UAV.value,
+                    'payload': serialize_state_dict(self.aggregator.state_dict()),
+                    'sender': self.id,
+                    'packet_count': self.packet_count,
+                    'type': 'model_update',
+                    'global_model_version': self.aggregator.global_model_version
+                }
+        command = BroadcastMessageCommand(json.dumps(response_message))
+        self.provider.send_communication_command(command)
         self.provider.schedule_timer("", self.provider.current_time() + 1)
 
     def handle_timer(self, timer: str) -> None:
+        self.provider.tracked_variables.update(self.aggregator.tracked_vars())
         self._send_heartbeat()
 
     def process_messages(self):
@@ -126,12 +138,15 @@ class SimpleUAVProtocol(IProtocol):
             sender_id = message['sender']
 
             if message['type'] == 'model_update':
+                client_model_version = message.get('local_model_version', 0)
                 sender_type = ("Sensor" if message['sender_type'] == SimpleSender.SENSOR.value else "UAV")
-                self.logger.info(f"Received model update from {sender_type} {sender_id}")
+                self.logger.info(f"Received model update from {sender_type} {sender_id} and local verison {client_model_version}")
+
+                # if client_model_version < self.aggregator.global_model_version:
+                #     return
 
                 decompressed_state_dict = decompress_and_deserialize_state_dict(message['payload'])
 
-                client_model_version = message.get('local_model_version', 0)
                 # Pass to aggregator
                 self.aggregator.receive_model_update(sender_id, decompressed_state_dict, client_model_version)
 

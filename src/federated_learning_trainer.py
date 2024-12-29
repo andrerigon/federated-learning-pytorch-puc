@@ -14,6 +14,8 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 from loguru import logger
+from collections import OrderedDict
+
 
 class FederatedLearningTrainer:
     """
@@ -48,6 +50,7 @@ class FederatedLearningTrainer:
         self.start_time = time.time()
         self.local_model_version = 0
         self.synchronous = synchronous
+        self.current_state = None
 
         # Load the dataset for the client
         self.dataset_loader = dataset_loader
@@ -90,6 +93,16 @@ class FederatedLearningTrainer:
         self.global_model_version = new_version
         self.logger.info(f"Client {self.id}: Updated global model to version {new_version}")
 
+    def aggregate(self, global_model: nn.Module, client_dict: OrderedDict, alpha=0.3, extra_info=None) -> OrderedDict:
+        global_dict = global_model.state_dict()
+        staleness = extra_info.get('staleness', 0) if extra_info else 0
+        logger.info(f"Staleness will be: {staleness}")
+        effective_alpha = alpha # / (1 + staleness)
+        for k in global_dict.keys():
+            if k in client_dict and global_dict[k].size() == client_dict[k].size():
+                global_dict[k] = (1 - effective_alpha)*global_dict[k] + effective_alpha*client_dict[k].dequantize()
+        return global_dict
+    
     def last_version(self):
         """
         Returns the current version of the global model.
@@ -98,6 +111,7 @@ class FederatedLearningTrainer:
             int: The version number of the global model.
         """
         return self.global_model_version
+    
 
     def start_training(self):
         """
@@ -106,7 +120,6 @@ class FederatedLearningTrainer:
         """
         while not self.finished:
             if self.should_train():
-                self.global_model_changed = False
                 self.train()
             else:
                 time.sleep(1)    
@@ -389,13 +402,20 @@ class FederatedLearningTrainer:
         self.local_model_version += 1
         local_model = torch.quantization.convert(local_model, mapping={'classifier': torch.nn.Identity})
 
-        self.current_state = local_model.state_dict()
+        new_state = local_model.state_dict()
+        if self.global_model_changed and not self.synchronous:
+            self.logger.info("Global model changed while training. Aggregating")
+            new_state = self.aggregate(self.global_model, new_state)
+            self.global_model_changed = False
+            
+        self.current_state = new_state
+
         self.model_updated = True
 
         self.logger.debug(f"Local model updated and ready for aggregation.")
 
     def train(self, epochs=1):
-        self.global_model_changed = False
+        # self.global_model_changed = False
         torch.backends.quantized.engine = 'qnnpack'
         try:
             # Record start time

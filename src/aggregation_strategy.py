@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from loguru import logger
 
 class AggregationStrategy(ABC):
     @abstractmethod
@@ -60,6 +61,7 @@ class FedAvgStrategy(AggregationStrategy):
         global_dict = global_model.state_dict()
         keys = global_dict.keys()
         num_clients = len(client_dict)
+        
         if num_clients == 0:
             return global_dict
 
@@ -87,7 +89,8 @@ class AsyncFedAvgStrategy(AggregationStrategy):
     def aggregate(self, global_model: nn.Module, client_dict: OrderedDict, alpha=0.1, extra_info=None) -> OrderedDict:
         global_dict = global_model.state_dict()
         staleness = extra_info.get('staleness', 0) if extra_info else 0
-        effective_alpha = self.base_alpha / (1 + staleness)
+        logger.info(f"Staleness will be: {staleness}")
+        effective_alpha = self.base_alpha # / (1 + staleness)
         for k in global_dict.keys():
             if k in client_dict and global_dict[k].size() == client_dict[k].size():
                 global_dict[k] = (1 - effective_alpha)*global_dict[k] + effective_alpha*client_dict[k].dequantize()

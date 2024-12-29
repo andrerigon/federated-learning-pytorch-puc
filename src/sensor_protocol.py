@@ -37,8 +37,7 @@ class SimpleSensorProtocol(IProtocol):
         print(f"\n\nme meg todim todim\n")
 
     def handle_timer(self, timer: str) -> None:
-        pass
-        # self._generate_packet()
+        self._generate_packet()
 
     def handle_packet(self, message: str) -> None:
         simple_message: SimpleMessage = json.loads(message)
@@ -47,7 +46,7 @@ class SimpleSensorProtocol(IProtocol):
         if simple_message['sender_type'] == SimpleSender.UAV.value:
             # If it's a model update message
             if simple_message['type'] == 'model_update':
-                new_version = simple_message.get('global_model_version', 0)
+                new_version = simple_message.get('global_model_version', -1)
                 if new_version <= self.federated_learning_trainer.global_model_version:
                     # Discard the message
                     self.logger.info(f"Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
@@ -60,12 +59,15 @@ class SimpleSensorProtocol(IProtocol):
                 del state
 
             # If it's a ping and the local model is updated
-            elif simple_message['type'] == 'ping' and self.federated_learning_trainer.model_updated:
+            elif simple_message['type'] == 'ping':
                 new_version = simple_message.get('global_model_version', 0)
                 # if new_version <= self.federated_learning_trainer.last_version():
                 #     # Discard the message
-                #     self.logger.info(f"Sensor {self.id}: Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
+                #     self.logger.debug(f"Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
                 #     return  # Exit without processing
+                if self.federated_learning_trainer.current_state == None or not self.federated_learning_trainer.model_updated: 
+                    self.logger.debug("No local model is available")
+                    return 
                 self.logger.info(f"Responding to ping from UAV {simple_message['sender']}")
                 response: SimpleMessage = {
                     'payload': serialize_state_dict(self.federated_learning_trainer.current_state),

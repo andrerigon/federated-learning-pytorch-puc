@@ -220,7 +220,7 @@ def main():
     parser.add_argument('--num_uavs', type=int, default=1, help='Number of UAVs in the simulation')
     parser.add_argument('--num_sensors', type=int, default=4, help='Number of sensors to deploy')
     parser.add_argument('--target_accuracy', type=float, default=50, help='Target accuracy')
-    parser.add_argument('--transmision_range', type=float, default=30, help='Device transmission range')
+    parser.add_argument('--transmision_range', type=float, default=5, help='Device transmission range')
     parser.add_argument('--grid_size', type=float, default=200, help='Gride side size')
     parser.add_argument('--tensor_dir', type=str, default="runs", help='Tensor output dir')
     parser.add_argument(
@@ -348,7 +348,8 @@ def main():
             strategy=strategy,
             convergence_criteria=convergence_criteria,
             output_dir='./runs',
-            round_interval=30.0
+            round_interval=30.0,
+            client_count=args.num_sensors
         )
         aggregators.append(aggregator)
 

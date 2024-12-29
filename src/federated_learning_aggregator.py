@@ -80,6 +80,8 @@ class FederatedLearningAggregator:
         self.converged = False
         self.start_time = time.time()
         self.client_count = client_count
+        self.client_versions = {}
+        self.tracked_variables = {}
 
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -148,24 +150,39 @@ class FederatedLearningAggregator:
 
         # Load testset for evaluation
         self.testset = self.dataset_loader.testset
+        self.logger.info(f"Aggregator Started for {self.client_count} clients")
 
     def start(self):
         """Start the evaluation thread."""
         self.evaluation_thread.start()
 
+    def tracked_vars(self): 
+        self.tracked_variables['aggregation_clients_count'] = len(self.received_client_ids)
+        self.tracked_variables['accuracy_checks'] = len(self.metrics_history)
+        self.tracked_variables['strategy'] = self.strategy_name
+        return self.tracked_variables
+
     def have_all_updates(self):
         """
         Check if we've received updates from 10 distinct client IDs.
         """
-        self.logger.info(f"received_client_ids {len(self.received_client_ids)} ")
+        self.logger.info(f"received_client_ids with size {len(self.received_client_ids)} ")
         return len(self.received_client_ids) == self.client_count  
 
     def receive_model_update(self, sender_id: str, client_dict: OrderedDict, local_model_version: int):
         """Called when a client model update arrives."""
         # Calculate staleness
         staleness = self.global_model_version - local_model_version
+
+        current_version = self.client_versions.get(sender_id, -1)
+
+        if current_version == local_model_version:
+            self.logger.info(f"Client [{sender_id}] already sent version {local_model_version}")
+            return 
         
+        self.client_versions[sender_id] = local_model_version
         self.received_client_ids.add(sender_id)
+
         # Record metrics
         message_time = time.time()
         self.communication_stats['total_messages'] += 1
@@ -181,6 +198,7 @@ class FederatedLearningAggregator:
             self.check_and_aggregate_fedavg()
         else:
             # For strategies that work with single updates
+            self.logger.info(f"Aggregating partialy for {self.strategy.__class__.__name__}")
             updated_state = self.strategy.aggregate(
                 self.global_model,
                 client_dict,
@@ -203,6 +221,7 @@ class FederatedLearningAggregator:
             # Check if strategy is FedAvg
         if self.is_fedavg():
             # Example: a helper method that checks if we have updates from all clients
+            self.logger.info("If fedavg")
             if self.have_all_updates():
                 self.logger.info("Aggregating FedAvg model (all clients' updates present).")
                 updated_state = self.strategy.aggregate(self.global_model, self.client_updates_buffer)
@@ -213,8 +232,6 @@ class FederatedLearningAggregator:
                 self.received_client_ids = set()
             else:
                 self.logger.info("Skipping FedAvg aggregation: not all clients have submitted updates yet.")
-        
-        else:
             if isinstance(self.strategy, (SAFAStrategy)) and (current_time - self.last_aggregation_time) < self.round_interval:
                 self.logger.info("Skipping aggregation: round interval not reached yet.")
                 return 
@@ -224,7 +241,10 @@ class FederatedLearningAggregator:
                 updated_state = self.strategy.aggregate(self.global_model, self.client_updates_buffer)
                 self.update_global_model(updated_state)
                 self.client_updates_buffer = []
-                self.last_aggregation_time = current_time
+                self.last_aggregation_time = current_time    
+        
+       
+            
                 
     # def check_and_aggregate_fedavg(self):
     #     """Check if it's time to aggregate for FedAvg/SAFA strategies."""
@@ -269,7 +289,14 @@ class FederatedLearningAggregator:
 
     def evaluate_global_model_periodically(self):
         """Periodically evaluate the global model until convergence."""
+        last_checked_version = -1
         while not self.stop_evaluation_flag:
+            if self.global_model_version <= last_checked_version:
+                time.sleep(5)
+                continue 
+            
+            self.logger.info(f"Convergency check for version {self.global_model_version}")
+            last_checked_version = self.global_model_version
             metrics = self.evaluate_global_model()
             self.metrics_history.append(metrics)
             
@@ -317,6 +344,10 @@ class FederatedLearningAggregator:
             'accuracy': accuracy
         }
 
+        self.tracked_variables['loss'] = mean_reconstruction_loss
+        self.tracked_variables['classification_loss'] = mean_classification_loss
+        self.tracked_variables['accuracy'] = accuracy
+
         # Update performance tracking
         self.performance_metrics['peak_accuracy'] = max(
             self.performance_metrics['peak_accuracy'], 
@@ -329,7 +360,7 @@ class FederatedLearningAggregator:
 
     def mode_converged_callback(self):
         """Called when the global model has converged."""
-        self.logger.info.info("Global model converged.")
+        self.logger.info("Global model converged.")
         step = len(self.metrics_history)
         self.converged = True
         self.tb_writer.add_text('Convergence', f'Model converged at step {step}', step)
@@ -434,7 +465,7 @@ class FederatedLearningAggregator:
         del self.global_model
         gc.collect()
 
-        self.logger.info.info(f"Aggregator {self.id}: Stopped and cleaned up.")
+        self.logger.info(f"Aggregator {self.id}: Stopped and cleaned up.")
         
         # Close TensorBoard writer
         self.tb_writer.close()
