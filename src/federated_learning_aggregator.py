@@ -192,7 +192,7 @@ class FederatedLearningAggregator:
         # Log to TensorBoard
         self.tb_writer.add_scalar('Staleness/Value', staleness, self.model_updates + 1)
 
-        if isinstance(self.strategy, (FedAvgStrategy, SAFAStrategy)):
+        if isinstance(self.strategy, (FedAvgStrategy)):
             # For strategies that expect a list of updates
             self.client_updates_buffer.append(client_dict)
             self.check_and_aggregate_fedavg()
@@ -202,14 +202,14 @@ class FederatedLearningAggregator:
             updated_state = self.strategy.aggregate(
                 self.global_model,
                 client_dict,
-                extra_info={'staleness': staleness}
+                extra_info={'staleness': staleness, 'client_id': sender_id}
             )
             self.update_global_model(updated_state)
             self.communication_stats['successful_updates'] += 1
 
     def is_fedavg(self) -> bool:
         """Check if current strategy is FedAvg or SAFA."""
-        return isinstance(self.strategy, (FedAvgStrategy, SAFAStrategy))
+        return isinstance(self.strategy, (FedAvgStrategy))
 
     def check_and_aggregate_fedavg(self):
         """
@@ -232,16 +232,16 @@ class FederatedLearningAggregator:
                 self.received_client_ids = set()
             else:
                 self.logger.info("Skipping FedAvg aggregation: not all clients have submitted updates yet.")
-            if isinstance(self.strategy, (SAFAStrategy)) and (current_time - self.last_aggregation_time) < self.round_interval:
-                self.logger.info("Skipping aggregation: round interval not reached yet.")
-                return 
-            else:
-                # Handle other strategies (e.g. SAFA) the same as before
-                self.logger.info("Doing non-FedAvg aggregation (e.g., SAFA).")
-                updated_state = self.strategy.aggregate(self.global_model, self.client_updates_buffer)
-                self.update_global_model(updated_state)
-                self.client_updates_buffer = []
-                self.last_aggregation_time = current_time    
+            # if isinstance(self.strategy, (SAFAStrategy)) and (current_time - self.last_aggregation_time) < self.round_interval:
+            #     self.logger.info("Skipping aggregation: round interval not reached yet.")
+            #     return 
+            # else:
+            #     # Handle other strategies (e.g. SAFA) the same as before
+            #     self.logger.info("Doing non-FedAvg aggregation (e.g., SAFA).")
+            #     updated_state = self.strategy.aggregate(self.global_model, self.client_updates_buffer)
+            #     self.update_global_model(updated_state)
+            #     self.client_updates_buffer = []
+            #     self.last_aggregation_time = current_time    
         
        
             

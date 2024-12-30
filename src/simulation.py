@@ -198,15 +198,7 @@ def plot_path(positions, sensor_positions, output_dir):
     plt.savefig(path)
 
 
-# Mapping strategy names to their classes
-STRATEGY_MAP = {
-    "FedAvgStrategy": FedAvgStrategy,
-    "AsyncFedAvgStrategy": AsyncFedAvgStrategy,
-    "RELAYStrategy": RELAYStrategy,
-    "SAFAStrategy": SAFAStrategy,
-    "AstraeaStrategy": AstraeaStrategy,
-    "TimeWeightedStrategy": TimeWeightedStrategy,
-}    
+   
 
 @logger.catch
 def main():
@@ -226,7 +218,7 @@ def main():
     parser.add_argument(
         "--strategy",
         type=str,
-        choices=STRATEGY_MAP.keys(),
+        choices=["FedAvgStrategy","AsyncFedAvgStrategy","RELAYStrategy","SAFAStrategy","AstraeaStrategy","TimeWeightedStrategy"],
         required=True,
         help="Name of the strategy to use (e.g., FedAvgStrategy, SAFAStrategy).",
     )
@@ -272,12 +264,19 @@ def main():
 
     # Parse the strategy name from command-line arguments
     strategy_name = args.strategy
-    
-    # Get the corresponding strategy class
-    strategy_class = STRATEGY_MAP[strategy_name]
-    
-    # Instantiate the strategy
-    strategy = strategy_class()
+
+    # Mapping strategy names to their classes
+    STRATEGY_MAP = {
+        "FedAvgStrategy": FedAvgStrategy(),
+        "AsyncFedAvgStrategy": AsyncFedAvgStrategy(),
+        "RELAYStrategy": RELAYStrategy(),
+        "SAFAStrategy": SAFAStrategy(total_clients=args.num_sensors),
+        "AstraeaStrategy": AstraeaStrategy(),
+        "TimeWeightedStrategy": TimeWeightedStrategy(),
+    } 
+
+    # Get the strategy
+    strategy = STRATEGY_MAP[strategy_name]
     
     # Check if training is synchronous
     is_synchronous = strategy_name == "FedAvgStrategy"
