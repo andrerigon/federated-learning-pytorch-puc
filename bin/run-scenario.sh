@@ -13,9 +13,9 @@ DEFAULT_SUCCESS_RATES=("1.0")
 STRATEGIES=(
   "FedAvgStrategy"
   "AsyncFedAvgStrategy"
-  "RELAYStrategy"
+#   "RELAYStrategy"
 #   "SAFAStrategy"
-  "AstraeaStrategy"
+#   "AstraeaStrategy"
 )
 
 ######################################################
