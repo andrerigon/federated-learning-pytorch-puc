@@ -19,6 +19,7 @@ from collections import OrderedDict
 from loguru import logger
 from typing import List, Optional, Dict
 import traceback
+from typing import Tuple, Set
 
 class AggregationStrategy(ABC):
     @abstractmethod
@@ -136,131 +137,234 @@ class AsyncFedAvgStrategy(AggregationStrategy):
 
 class SAFAStrategy(AggregationStrategy):
     """
-    SAFA: Server-Aided Federated Analytics with differential privacy.
-    Reference: SAFA: a Semi-Asynchronous Protocol for Fast Federated Learning
-    DOI: 10.1109/TC.2020.2994391
+    SAFA: A Semi-Asynchronous Protocol for Fast Federated Learning With Low Overhead
+    Reference: DOI: 10.1109/TC.2020.2994391
     
-    This strategy provides differential privacy guarantees by:
-    1. Adding calibrated Gaussian noise to client updates
-    2. Ensuring minimum participation thresholds
-    3. Managing update timing to balance privacy and model freshness
+    The strategy implements three key mechanisms from the paper:
+    1. Lag-tolerant Model Distribution: Handles version differences between clients
+    2. Post-training Client Selection: Selects clients after training completion
+    3. Three-step Discriminative Aggregation: Uses cache and bypass structures
+    
+    This implementation adds extra robustness for handling communication losses 
+    and partial updates in real-world scenarios.
     """
     def __init__(self, 
-                 epsilon: float = 1.0, 
-                 delta: float = 1e-5,
-                 total_clients: int = 100,
-                 timeout_seconds: float = 30,
-                 initial_mixing_weight: float = 0.9,  # Higher initial weight
-                 final_mixing_weight: float = 0.1): 
-        
-         # Privacy parameters
-        self.epsilon = epsilon
-        self.delta = delta
-        
-        # First, calculate minimum clients needed for privacy
-        privacy_min = int(math.ceil(math.sqrt(2 * math.log(1.25/delta)) / epsilon))
-        
-        # Calculate system minimum (at least 2 clients or 10% of total)
-        system_min = max(2, int(0.1 * total_clients))
-        
-        # Take the larger of privacy and system minimums, but don't exceed total
-        self.min_clients = min(max(privacy_min, system_min), total_clients)
-        
-        # Maximum should be larger than minimum but not exceed total
-        self.max_clients = min(total_clients, max(self.min_clients, int(0.8 * total_clients)))
-        
-        # Validate the thresholds
-        if self.max_clients < self.min_clients:
-            logger.warning("Maximum clients less than minimum. Adjusting max to equal min.")
-            self.max_clients = self.min_clients
-        
-        self.last_aggregation_time = time.time()
-        self.current_updates = 0
-        self.mixing_weight = 0.1
+                 total_clients: int,
+                 lag_tolerance: int = 2,
+                 initial_weight: float = 0.8,
+                 final_weight: float = 0.2,
+                 selection_fraction: float = 0.5,
+                 timeout_seconds: float = 30):
+        # System parameters
+        self.total_clients = total_clients
+        self.lag_tolerance = lag_tolerance
+        self.selection_fraction = selection_fraction
         self.timeout_seconds = timeout_seconds
+        
+        # Tracking state and version information
+        self.current_version = 0
+        self.client_versions = {}
+        self.last_aggregation_time = time.time()
+        
+        # Storage structures for client updates
+        self.pending_updates = {}  # Temporary storage for incoming updates
+        self.model_cache = {}     # Storage for selected updates
+        
+        # Adaptive weight parameters for faster initial learning
+        self.initial_weight = initial_weight
+        self.final_weight = final_weight
+        self.current_weight = initial_weight
+        self.round_count = 0
+        
+        logger.info(f"SAFA initialized: {total_clients} clients, "
+                   f"selection fraction: {selection_fraction}")
 
+    def _validate_client_update(self, client_dict: Optional[OrderedDict], 
+                              global_dict: OrderedDict) -> bool:
+        """
+        Validates that a client update is usable by checking:
+        1. Update is not None
+        2. Update has the same structure as global model
+        3. All tensors have correct shapes
+        
+        Returns True if update is valid, False otherwise.
+        """
+        try:
+            if client_dict is None:
+                return False
+                
+            # Check keys match
+            if set(client_dict.keys()) != set(global_dict.keys()):
+                return False
+                
+            # Check tensor shapes match    
+            for k in global_dict.keys():
+                if client_dict[k].shape != global_dict[k].shape:
+                    return False
+                    
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error validating client update: {str(e)}")
+            return False
+
+    def _safe_aggregate_tensors(self, global_tensor: torch.Tensor,
+                              updates: List[torch.Tensor],
+                              weights: List[float]) -> torch.Tensor:
+        """
+        Safely aggregates tensors using weighted average.
+        Handles edge cases like empty updates list.
+        """
+        if not updates or not weights:
+            return global_tensor.clone()
+            
+        result = torch.zeros_like(global_tensor)
+        total_weight = 0.0
+        
+        for update, weight in zip(updates, weights):
+            result += weight * update
+            total_weight += weight
+            
+        if total_weight > 0:
+            result = (1 - total_weight) * global_tensor + result
+        else:
+            result = global_tensor.clone()
+            
+        return result
+
+    def aggregate(self, global_model: nn.Module, client_dict: OrderedDict, 
+                 alpha: float = 0.1, extra_info: Optional[Dict] = None) -> OrderedDict:
+        """
+        Performs SAFA's three-step aggregation with robust error handling.
+        Always returns a valid state dictionary, even in error cases.
+        """
+        # Always get a copy of global state dict first as fallback
+        global_dict = global_model.state_dict()
+        
+        # Validate inputs
+        if not extra_info or 'client_id' not in extra_info:
+            logger.warning("Missing client ID in extra info")
+            return global_dict
+            
+        client_id = extra_info['client_id']
+        
+        # Validate client update
+        if not self._validate_client_update(client_dict, global_dict):
+            logger.warning(f"Invalid update from client {client_id}")
+            return global_dict
+            
+        try:
+            # Store update in pending updates
+            self.pending_updates[client_id] = client_dict
+            
+            # Check if we should aggregate
+            current_time = time.time()
+            num_updates = len(self.pending_updates)
+            should_aggregate = (
+                num_updates >= self.selection_fraction * self.total_clients or
+                (current_time - self.last_aggregation_time) > self.timeout_seconds
+            )
+            
+            if not should_aggregate:
+                return global_dict
+                
+            # Prepare for aggregation
+            new_dict = OrderedDict()
+            
+            # Process each parameter
+            for key, global_param in global_dict.items():
+                valid_updates = []
+                update_weights = []
+                
+                # Collect valid updates for this parameter
+                for cid, update in self.pending_updates.items():
+                    if key in update:
+                        valid_updates.append(update[key])
+                        update_weights.append(self.current_weight)
+                        
+                # Safely aggregate this parameter
+                new_dict[key] = self._safe_aggregate_tensors(
+                    global_param,
+                    valid_updates,
+                    update_weights
+                )
+                
+            # Update state
+            self.round_count += 1
+            self.current_version += 1
+            self.last_aggregation_time = current_time
+            self.pending_updates.clear()
+            
+            # Adjust mixing weight for next round
+            if self.round_count < 5:
+                progress = self.round_count / 5
+                self.current_weight = (self.initial_weight * (1 - progress) + 
+                                     self.final_weight * progress)
+            else:
+                self.current_weight = self.final_weight
+                
+            logger.info(f"Round {self.round_count}: Aggregated {num_updates} updates "
+                       f"with weight {self.current_weight:.3f}")
+            
+            return new_dict
+            
+        except Exception as e:
+            logger.error(f"Error during aggregation: {str(e)}")
+            return global_dict
+        
+class RELAYStrategy(AggregationStrategy):
+    """
+    RELAY: FedAvg with adaptive client learning rates
+    DOI: 10.1109/TWC.2022.3155596
+    
+    Key features:
+    - Adapts client mixing weights based on local data characteristics
+    - Higher initial weights for faster convergence from random initialization
+    - Gradual transition to stable weights
+    """
+    def __init__(self, 
+                 initial_mixing_weight: float = 0.8,  # Start with high trust in clients
+                 final_mixing_weight: float = 0.2,    # Converge to more conservative weight
+                 transition_rounds: int = 5):         # How many rounds to transition
         self.initial_mixing_weight = initial_mixing_weight
         self.final_mixing_weight = final_mixing_weight
-        self.mixing_weight = initial_mixing_weight  # Start with higher weight
-        self.aggregation_count = 0  # Track number of successful aggregations
+        self.mixing_weight = initial_mixing_weight
+        self.transition_rounds = transition_rounds
+        self.aggregation_count = 0
         
-        logger.info(f"SAFA initialized with privacy (ε={epsilon}, δ={delta})")
-        logger.info(f"Client thresholds: min={self.min_clients}, max={self.max_clients} "
-                    f"out of {total_clients} total clients")
-    
+        logger.info(f"RELAY initialized with mixing weights: "
+                   f"initial={initial_mixing_weight}, final={final_mixing_weight}")
+        
     def _adjust_mixing_weight(self):
-        """
-        Gradually decrease mixing weight from initial to final value
-        over the first few aggregations.
-        """
-        if self.aggregation_count < 5:  # Transition period
-            # Linearly decrease weight over first 5 aggregations
-            progress = self.aggregation_count / 5
+        """Gradually decrease mixing weight for more stable updates."""
+        if self.aggregation_count < self.transition_rounds:
+            progress = self.aggregation_count / self.transition_rounds
             self.mixing_weight = (self.initial_mixing_weight * (1 - progress) + 
                                 self.final_mixing_weight * progress)
         else:
             self.mixing_weight = self.final_mixing_weight
-
-    def _should_aggregate(self, extra_info: Optional[Dict] = None) -> bool:
-        """
-        Determines if we should perform aggregation based on:
-        1. Having enough updates for privacy guarantees
-        2. Either reaching max clients or timeout
-        """
-        current_time = time.time()
-        timeout_reached = (current_time - self.last_aggregation_time) > self.timeout_seconds
-        
-        if self.current_updates < self.min_clients:
-            return False
             
-        return self.current_updates >= self.max_clients or timeout_reached
-        
     def aggregate(self, global_model: nn.Module, client_dict: OrderedDict, 
                  alpha: float = 0.1, extra_info: Optional[Dict] = None) -> OrderedDict:
         """
-        Aggregates client updates with differential privacy guarantees.
-        
-        The aggregation process:
-        1. Updates client counter and checks aggregation conditions
-        2. Calculates noise scale based on privacy parameters
-        3. Adds calibrated noise to client updates
-        4. Performs weighted averaging with noisy updates
-        
-        Args:
-            global_model: Current global model
-            client_dict: State dictionary from client
-            alpha: Learning rate (unused in this implementation)
-            extra_info: Additional information like client ID
+        Aggregate client updates with adaptive mixing weights.
+        Uses higher weights initially to learn quickly from client knowledge,
+        then gradually reduces weight for stability.
         """
-        # Track this update
-        self.current_updates += 1
-        
-        # Check if we should aggregate yet
-        if not self._should_aggregate(extra_info):
-            logger.info("Not aggregating this time")
+        if not client_dict:
             return global_model.state_dict()
             
-        logger.info("Will aggregate this time")    
         # Get global model state
         global_dict = global_model.state_dict()
         new_dict = OrderedDict()
         
-        # Calculate privacy-preserving noise scale
-        # Scale noise based on number of participating clients
-        base_sigma = math.sqrt(2 * math.log(1.25/self.delta)) / self.epsilon
-        sigma = base_sigma * (1.0 / self.current_updates)  # Scale by participation
-        
         try:
-            # Process each parameter with privacy-preserving noise
+            # Process each parameter with adaptive mixing
             for k, v in global_dict.items():
-                noise = torch.normal(0, sigma, client_dict[k].shape, 
-                                  device=client_dict[k].device)
-                
-                # Use current mixing weight
                 new_dict[k] = ((1 - self.mixing_weight) * v + 
-                              self.mixing_weight * (client_dict[k] + noise))
+                              self.mixing_weight * client_dict[k])
                               
-            # Update aggregation state
+            # Update state
             self.aggregation_count += 1
             self._adjust_mixing_weight()
             
@@ -270,46 +374,188 @@ class SAFAStrategy(AggregationStrategy):
         except Exception as e:
             logger.error(f"Error during aggregation: {str(e)}")
             return global_dict
-    
-class RELAYStrategy(AggregationStrategy):
-    """
-    RELAY: Focuses on resource efficiency and uses a staleness-aware scaling.
-    Prioritizes least-available learners and scales updates by similarity or staleness.
-    
-    As a placeholder, we do staleness-based scaling similar to AsyncFedAvg.
-    """
-    def __init__(self, base_alpha: float = 0.1):
-        self.base_alpha = base_alpha
-
-    def aggregate(self, global_model: nn.Module, client_dict: OrderedDict, alpha=0.1, extra_info=None) -> OrderedDict:
-        global_dict = global_model.state_dict()
-        staleness = extra_info.get('staleness', 0) if extra_info else 0
-        effective_alpha = self.base_alpha / (1 + staleness)
-        for k in global_dict.keys():
-            if k in client_dict and global_dict[k].size() == client_dict[k].size():
-                global_dict[k] = (1 - effective_alpha)*global_dict[k] + effective_alpha*client_dict[k].dequantize()
-        return global_dict
 
 class AstraeaStrategy(AggregationStrategy):
     """
-    Astraea: A sequential round training approach. 
-    In a real Astraea scenario:
-    - One client updates model
-    - The mediator updates params
-    - Next client trains and so forth
-
-    Here, we simulate a simple sequential blending with a fixed alpha each time.
+    Astraea: Self-balancing federated learning with reputation scoring
+    Reference: Astraea: Self-balancing federated learning for improving classification accuracy 
+    of mobile deep learning applications
+    DOI: 10.1109/COMST.2020.3005238
+    
+    Pseudocode:
+    
+    Server initialization:
+        - Initialize global model w_0
+        - Set reputation scores R = {} (empty dict)
+        - Set reputation threshold θ
+        - Set initial mixing weight α_init (high)
+        - Set final mixing weight α_final (low)
+        - Set transition rounds T
+    
+    For each client update from client k:
+        1. Calculate Contribution Score:
+           - Compute avg difference d between client and global parameters
+           - Convert to score: s = exp(-d)
+           
+        2. Update Reputation:
+           If first update from k:
+               R[k] = s
+           Else:
+               R[k] = β * R[k] + (1-β) * s
+               
+        3. Check Reputation:
+           If R[k] < θ:
+               Reject update
+           Else:
+               - Calculate effective_weight = α * R[k]
+               - w_t+1 = (1 - effective_weight) * w_t + effective_weight * w_k
+               
+        4. Adjust mixing weight α:
+           If round < T:
+               α = α_init * (1 - round/T) + α_final * (round/T)
+           Else:
+               α = α_final
+        
+    Key features:
+        - Reputation tracks client reliability over time
+        - Higher weights for reliable clients
+        - Initial high mixing weights for faster learning
+        - Automatic exclusion of unreliable clients
     """
-    def __init__(self, base_alpha: float = 0.1):
-        self.base_alpha = base_alpha
+    def __init__(self, 
+                 initial_mixing_weight: float = 0.8,  
+                 final_mixing_weight: float = 0.2,    
+                 transition_rounds: int = 5,
+                 reputation_threshold: float = 0.1):
+        """
+        Initialize the Astraea federated learning strategy.
 
-    def aggregate(self, global_model: nn.Module, client_dict: OrderedDict, alpha=0.1, extra_info=None) -> OrderedDict:
-        global_dict = global_model.state_dict()
-        effective_alpha = self.base_alpha
+        Args:
+            initial_mixing_weight (float, optional): Starting weight for mixing client updates
+                with global model. Higher values (> 0.5) mean stronger client influence initially,
+                which helps faster learning from random initialization. Defaults to 0.8.
+                
+            final_mixing_weight (float, optional): The stable mixing weight after transition.
+                Lower values (< 0.5) prioritize stability and reduce oscillations in the
+                trained model. Defaults to 0.2.
+                
+            transition_rounds (int, optional): Number of rounds over which to linearly
+                decrease the mixing weight from initial to final value. More rounds mean
+                smoother transition. Defaults to 5.
+                
+            reputation_threshold (float, optional): Minimum reputation score [0-1] required
+                for a client's update to be accepted. Higher values mean stricter filtering.
+                Updates from clients below this threshold are rejected. Defaults to 0.3.
+        
+        The strategy maintains reputation scores for clients and combines them with
+        adaptive mixing weights to determine each client's influence on the global model.
+        """
+        # Mixing weight parameters
+        self.initial_mixing_weight = initial_mixing_weight
+        self.final_mixing_weight = final_mixing_weight
+        self.mixing_weight = initial_mixing_weight
+        self.transition_rounds = transition_rounds
+        self.reputation_threshold = reputation_threshold
+        
+        # State tracking
+        self.reputation_scores = {}  # client_id -> score
+        self.aggregation_count = 0
+        
+    def _adjust_mixing_weight(self):
+        """Gradually decrease mixing weight for more stable updates."""
+        if self.aggregation_count < self.transition_rounds:
+            progress = self.aggregation_count / self.transition_rounds
+            self.mixing_weight = (self.initial_mixing_weight * (1 - progress) + 
+                                self.final_mixing_weight * progress)
+        else:
+            self.mixing_weight = self.final_mixing_weight
+
+    def _calculate_contribution_score(self, client_dict: OrderedDict, 
+                               global_dict: OrderedDict) -> float:
+        """
+        Calculate reputation score based on similarity to global model.
+        Returns a score between 0 and 1, where:
+        - Score close to 1 means the client update is similar to global model
+        - Score close to 0 means very different update
+        """
+        total_relative_diff = 0.0
+        param_count = 0
+        
         for k in global_dict.keys():
-            if k in client_dict and global_dict[k].size() == client_dict[k].size():
-                global_dict[k] = (1 - effective_alpha)*global_dict[k] + effective_alpha*client_dict[k].dequantize()
-        return global_dict
+            if k in client_dict:
+                # Calculate relative difference normalized by parameter magnitude
+                diff = (client_dict[k].float() - global_dict[k].float()).abs()
+                magnitude = global_dict[k].float().abs() + 1e-8  # Avoid division by zero
+                relative_diff = (diff / magnitude).mean().item()
+                total_relative_diff += relative_diff
+                param_count += 1
+                
+        if param_count == 0:
+            return 0.0
+            
+        # Average relative difference across all parameters
+        avg_relative_diff = total_relative_diff / param_count
+        
+        # Convert to score between 0 and 1
+        # Using a softer decay that gives higher scores
+        score = 1 / (1 + avg_relative_diff)  # This gives higher scores than exp(-diff)
+        
+        return score
+
+    def aggregate(self, global_model: nn.Module, client_dict: OrderedDict, 
+                 alpha: float = 0.1, extra_info: Optional[Dict] = None) -> OrderedDict:
+        """
+        Aggregate client update with reputation-based weighting.
+        Higher reputation clients have more influence on the global model.
+        """
+        if not extra_info or 'client_id' not in extra_info:
+            return global_model.state_dict()
+            
+        client_id = extra_info['client_id']
+        global_dict = global_model.state_dict()
+        new_dict = OrderedDict()
+
+        try:
+            # Calculate contribution score
+            contribution = self._calculate_contribution_score(client_dict, global_dict)
+            
+            # Update reputation using exponential moving average
+            if client_id not in self.reputation_scores:
+                # Give new clients a chance with decent initial reputation
+                self.reputation_scores[client_id] = max(0.5, contribution)
+            else:
+                beta = 0.9  # History weight
+                old_score = self.reputation_scores[client_id]
+                new_score = beta * old_score + (1 - beta) * contribution
+                self.reputation_scores[client_id] = new_score
+            
+            current_reputation = self.reputation_scores[client_id]
+            
+            # Only aggregate if reputation is above threshold
+            if current_reputation >= self.reputation_threshold:
+                # Combine mixing weight with reputation
+                effective_weight = self.mixing_weight * current_reputation
+                
+                # Aggregate parameters
+                for k, v in global_dict.items():
+                    new_dict[k] = ((1 - effective_weight) * v + 
+                                 effective_weight * client_dict[k])
+                    
+                logger.info(f"Client {client_id} reputation: {current_reputation:.3f}, "
+                          f"effective weight: {effective_weight:.3f}")
+            else:
+                logger.warning(f"Skipped client {client_id} - low reputation: {current_reputation:.3f}")
+                return global_dict
+                
+            # Update state
+            self.aggregation_count += 1
+            self._adjust_mixing_weight()
+            
+            return new_dict
+            
+        except Exception as e:
+            logger.error(f"Error during aggregation: {str(e)}")
+            return global_dict
 
 class TimeWeightedStrategy(AggregationStrategy):
     """

@@ -406,8 +406,8 @@ class FederatedLearningTrainer:
         if self.global_model_changed and not self.synchronous:
             self.logger.info("Global model changed while training. Aggregating")
             new_state = self.aggregate(self.global_model, new_state)
-            self.global_model_changed = False
             
+        self.global_model_changed = False    
         self.current_state = new_state
 
         self.model_updated = True

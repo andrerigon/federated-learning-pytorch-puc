@@ -81,9 +81,10 @@ class SimpleSensorProtocol(IProtocol):
                     'local_model_version': self.federated_learning_trainer.last_version()  # Include version used for training
                 }
                 command = SendMessageCommand(json.dumps(response), simple_message['sender'])
-                self.communicator.send_message(command, self.provider)
-                self.packet_count += 1
-                self.federated_learning_trainer.model_updated = False
+                result = self.communicator.send_message(command, self.provider)
+                if result:
+                    self.packet_count += 1
+                    self.federated_learning_trainer.model_updated = False
                 del command, response
         del simple_message, message
         # gc.collect() 

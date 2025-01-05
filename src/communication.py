@@ -12,8 +12,8 @@ Generic Type Parameters:
 """
 
 import random
-import logging
 from typing import Generic, TypeVar, Any
+from loguru import logger
 
 # Define the generic type for the command/message
 T = TypeVar('T')
@@ -74,7 +74,7 @@ class CommunicationMediator(Generic[T]):
             provider.send_communication_command(command)
             return True
         else:
-            logging.info("Message failed to send due to simulated communication error.")
+            logger.debug("Message failed to send due to simulated communication error.")
             return False
 
     def log_metrics(self) -> dict:

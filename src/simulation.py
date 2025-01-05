@@ -308,7 +308,7 @@ def main():
     sensor_id = 0
     aggregators = []
     for pos in sensor_positions:
-        output_dir = os.path.join('./runs', f"client_{sensor_id}")
+        output_dir = os.path.join(tensor_dir, f"client_{sensor_id}")
         os.makedirs(output_dir, exist_ok=True)
         metrics = MetricsLogger(client_id=sensor_id, output_dir=output_dir)    
 
@@ -335,7 +335,7 @@ def main():
     convergence_criteria = AccuracyConvergence(threshold=args.target_accuracy, patience=5)
 
     for i in range(args.num_uavs):
-        uav_output_dir = os.path.join('./runs', f"client_{sensor_id}")
+        uav_output_dir = os.path.join(tensor_dir, f"client_{sensor_id}")
         os.makedirs(uav_output_dir, exist_ok=True)
         metrics = MetricsLogger(client_id=sensor_id, output_dir=uav_output_dir)    
 
@@ -346,14 +346,14 @@ def main():
             metrics,
             strategy=strategy,
             convergence_criteria=convergence_criteria,
-            output_dir='./runs',
+            output_dir=tensor_dir,
             round_interval=30.0,
             client_count=args.num_sensors
         )
         aggregators.append(aggregator)
 
         start_position = mission_lists[i][0]  # Use the first position in the mission list as the start position
-        uav_protocol = create_protocol_with_params(SimpleUAVProtocol, aggregator=aggregator , mission_list=mission_lists[i], output_dir=uav_output_dir)
+        uav_protocol = create_protocol_with_params(SimpleUAVProtocol, aggregator=aggregator , mission_list=mission_lists[i], output_dir=uav_output_dir, success_rate=args.success_rate, grid_size=grid_size)
         leader_ids.append(builder.add_node(uav_protocol, start_position))
     
     # Add handlers as before
@@ -371,7 +371,6 @@ def main():
 
     node = simulation.get_node(sensor_ids[0])
     print(f"\n\n\nprotocol: {node.protocol_encapsulator.protocol.bla()}\n\n\n")
-
 
     positions = []
     sensor_positions_log = []

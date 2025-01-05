@@ -10,6 +10,7 @@ from gradysim.protocol.plugin.mission_mobility import MissionMobilityPlugin, Mis
 from typing import List, Dict
 from sensor_protocol import SimpleMessage, SimpleSender
 from federated_learning_aggregator import FederatedLearningAggregator
+from communication import CommunicationMediator
 from serialization import decompress_and_deserialize_state_dict, serialize_state_dict
 from loguru import logger
 
@@ -70,7 +71,7 @@ class SimpleUAVProtocol(IProtocol):
     - The UAV no longer directly manages model logic or strategies.
     """
 
-    def __init__(self, aggregator:FederatedLearningAggregator  = None, mission_list=[(0, 0, 20),(150, 0, 20),(0, 0, 20),(0, 150, 20),(0, 0, 20),(-150, 0, 20),(0, 0, 20),(0, -150, 20)]):
+    def __init__(self, aggregator:FederatedLearningAggregator  = None, mission_list=[(0, 0, 20),(150, 0, 20),(0, 0, 20),(0, 150, 20),(0, 0, 20),(-150, 0, 20),(0, 0, 20),(0, -150, 20)], success_rate = 1.0, grid_size=None):
         self.aggregator = aggregator
         self.mission_list = mission_list
         self.last_received_time = {}
@@ -78,6 +79,8 @@ class SimpleUAVProtocol(IProtocol):
         self.message_queue = queue.Queue()
         self.message_processing_thread = threading.Thread(target=self.process_messages)
         self.message_processing_thread.daemon = True
+        self.success_rate = success_rate
+        self.grid_size = grid_size
 
     def initialize(self) -> None:
         self.packet_count = 0
@@ -86,6 +89,7 @@ class SimpleUAVProtocol(IProtocol):
         self.logger = logger.bind(source="uav", uav_id=self.id)
         self.logger.info(f"Starting UAV")
 
+        self.communicator = CommunicationMediator[SendMessageCommand](success_rate = self.success_rate)
         mission_config = MissionMobilityConfiguration(loop_mission=LoopMission.RESTART)
         self._mission = MissionMobilityPlugin(self, mission_config)
         self._mission.start_mission(self.mission_list)
@@ -121,7 +125,12 @@ class SimpleUAVProtocol(IProtocol):
         self.provider.schedule_timer("", self.provider.current_time() + 1)
 
     def handle_timer(self, timer: str) -> None:
-        self.provider.tracked_variables.update(self.aggregator.tracked_vars())
+        map = self.aggregator.tracked_vars()
+        map.update(
+            {"success_rate": self.success_rate,
+             "grid_size": self.grid_size
+            })
+        self.provider.tracked_variables.update(map)
         self._send_heartbeat()
 
     def process_messages(self):
@@ -160,7 +169,7 @@ class SimpleUAVProtocol(IProtocol):
                     'global_model_version': self.aggregator.global_model_version
                 }
                 command = SendMessageCommand(json.dumps(response_message), sender_id)
-                self.provider.send_communication_command(command)
+                self.communicator.send_message(command, self.provider)
 
             elif message['type'] == 'ping':
                 self.logger.info(f"Received ping from {sender_id}")
@@ -173,7 +182,7 @@ class SimpleUAVProtocol(IProtocol):
                     'global_model_version': self.aggregator.global_model_version
                 }
                 command = BroadcastMessageCommand(json.dumps(response_message))
-                self.provider.send_communication_command(command)
+                self.communicator.send_message(command, self.provider)
             else:
                 self.logger.warning(f"Unknown message type from sender {sender_id}")
 
