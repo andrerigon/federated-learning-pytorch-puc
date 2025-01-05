@@ -307,6 +307,7 @@ def main():
     sensor_ids = []
     sensor_id = 0
     aggregators = []
+    trainers = []
     for pos in sensor_positions:
         output_dir = os.path.join(tensor_dir, f"client_{sensor_id}")
         os.makedirs(output_dir, exist_ok=True)
@@ -319,6 +320,8 @@ def main():
             metrics,
             synchronous=is_synchronous
         )
+
+        trainers.append(federated_trainer)
         
         sensor_protocol = create_protocol_with_params(SimpleSensorProtocol, 
          federated_learning_trainer=federated_trainer,
@@ -389,6 +392,8 @@ def main():
     while simulation.step_simulation() and keep_going:
         if all(t.converged for t in aggregators):
             keep_going = False
+            for t in trainers: 
+                t.stop()
             simulation._finalize_simulation()
             break
   
