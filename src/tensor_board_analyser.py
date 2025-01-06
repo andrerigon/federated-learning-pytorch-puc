@@ -599,20 +599,39 @@ class TensorBoardAnalyzer:
 
     def get_colors(self, n: int):
         """
-        Retorna lista de n cores distintas para uso em gráficos.
+        Returns a list of n visually distinct colors using a curated palette.
         """
         if n <= 0:
             return []
-
-        if n <= 10:
-            cmap = plt.get_cmap('tab10')
-        elif n <= 20:
-            cmap = plt.get_cmap('tab20')
-        else:
-            cmap = plt.get_cmap('rainbow')
-
-        indices = np.linspace(0, 1, n)
-        colors = [matplotlib.colors.to_hex(cmap(i)) for i in indices]
+        
+        # Custom color palette inspired by Tableau and Material Design
+        custom_palette = [
+            '#1f77b4',  # Steel Blue
+            '#ff7f0e',  # Safety Orange
+            '#2ca02c',  # Cooked Asparagus Green
+            '#d62728',  # Brick Red
+            '#9467bd',  # Muted Purple
+            '#8c564b',  # Chestnut Brown
+            '#e377c2',  # Raspberry Yogurt Pink
+            '#7f7f7f',  # Middle Gray
+            '#bcbd22',  # Curry Yellow-Green
+            '#17becf',  # Blue-Teal
+            '#aec7e8',  # Soft Blue
+            '#ffbb78',  # Soft Orange
+            '#98df8a',  # Soft Green
+            '#ff9896',  # Soft Red
+            '#c5b0d5'   # Soft Purple
+        ]
+        
+        if n <= len(custom_palette):
+            return custom_palette[:n]
+        
+        # If we need more colors, use a color map
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        cmap = plt.get_cmap('viridis')
+        colors = [matplotlib.colors.to_hex(cmap(i)) for i in np.linspace(0, 1, n)]
         return colors
 
     def plot_comparisons(self, results_df: pd.DataFrame, output_dir: str):
