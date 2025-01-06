@@ -738,86 +738,133 @@ class TensorBoardAnalyzer:
 
     def plot_multidimensional_comparisons(self, results_df: pd.DataFrame, output_dir: str):
         """
-        Gera comparações mais amplas, incluindo heatmaps e parallel coordinates,
-        mantendo a estrutura original.
+        Generates multi-dimensional comparisons:
+        1) Dimension Impact Analysis (3x2 grid of grouped bar plots for 
+            final_accuracy and convergence_time by sensor_count, grid_size, success_rate)
+        2) Strategy Performance Heatmaps (final_accuracy, convergence_time, avg_staleness)
+        3) Parallel Coordinates Plot
+
+        This replaces the old line plots with grouped bar plots for easier comparison
+        of discrete dimension values.
         """
+
         plt.style.use('default')
         colors = self.get_colors(3)
 
-        # 1. Dimension Impact Analysis (3x2 grid)
+        # ---------------------------------------------------
+        # 1. Dimension Impact Analysis (grouped bar plots)
+        # ---------------------------------------------------
         fig, axes = plt.subplots(3, 2, figsize=(20, 24))
-        fig.suptitle('Impact Analysis Across All Dimensions', fontsize=16, y=1.00)
+        fig.suptitle('Impact Analysis Across All Dimensions (Grouped Bar)', fontsize=16, y=1.00)
 
-        # Row 1: Sensor Count Impact (Accuracy x Convergence Time)
-        for strategy in results_df['strategy'].unique():
-            data = results_df[results_df['strategy'] == strategy]
-            axes[0,0].plot(data['sensor_count'], data['final_accuracy'], 
-                        marker='o', label=strategy, linewidth=2)
-        axes[0,0].set_title('Accuracy by Sensor Count')
-        axes[0,0].set_xlabel('Number of Sensors')
-        axes[0,0].set_ylabel('Final Accuracy (%)')
-        axes[0,0].grid(True, alpha=0.3)
-        axes[0,0].legend()
+        # We want to show 2 metrics (final_accuracy, convergence_time) across 3 dimensions 
+        # (sensor_count, grid_size, success_rate).
+        # The layout:
+        #   Row 0: sensor_count => (0,0)=Accuracy by sensor_count, (0,1)=Time by sensor_count
+        #   Row 1: grid_size    => (1,0)=Accuracy by grid_size   , (1,1)=Time by grid_size
+        #   Row 2: success_rate => (2,0)=Accuracy by success_rate, (2,1)=Time by success_rate
 
-        for strategy in results_df['strategy'].unique():
-            data = results_df[results_df['strategy'] == strategy]
-            axes[0,1].plot(data['sensor_count'], data['convergence_time'], 
-                        marker='o', label=strategy, linewidth=2)
-        axes[0,1].set_title('Convergence Time by Sensor Count')
-        axes[0,1].set_xlabel('Number of Sensors')
-        axes[0,1].set_ylabel('Convergence Time (min)')
-        axes[0,1].grid(True, alpha=0.3)
-        axes[0,1].legend()
+        # Helper function to create a bar plot
+        def grouped_bar(ax, df, x_col, y_col, title, x_label, y_label):
+            """
+            Creates a grouped bar plot with hue='strategy'.
+            """
+            # Drop rows missing dimension or metric
+            df = df.dropna(subset=[x_col, y_col]).copy()
+            if df.empty:
+                ax.set_title(f"{title} (No data)")
+                return
 
-        # Row 2: Grid Size Impact
-        for strategy in results_df['strategy'].unique():
-            data = results_df[results_df['strategy'] == strategy]
-            axes[1,0].plot(data['grid_size'], data['final_accuracy'], 
-                        marker='o', label=strategy, linewidth=2)
-        axes[1,0].set_title('Accuracy by Grid Size')
-        axes[1,0].set_xlabel('Grid Size')
-        axes[1,0].set_ylabel('Final Accuracy (%)')
-        axes[1,0].grid(True, alpha=0.3)
-        axes[1,0].legend()
+            # Convert dimension col to string for easy discrete grouping
+            df[x_col] = df[x_col].astype(str)
 
-        # Verifica se 'convergence_rate' existe antes de plotar
-        for strategy in results_df['strategy'].unique():
-            data = results_df[results_df['strategy'] == strategy]
-            if 'convergence_time' in data.columns:
-                axes[1,1].plot(data['grid_size'], data['convergence_time'],
-                               marker='o', label=strategy, linewidth=2)
-        axes[1,1].set_title('Convergence Time by Grid Size')
-        axes[1,1].set_xlabel('Grid Size')
-        axes[1,1].set_ylabel('Convergence Time')
-        axes[1,1].grid(True, alpha=0.3)
-        axes[1,1].legend()
+            # Distinct strategies for color palette
+            n_strategies = df['strategy'].nunique()
+            palette = self.get_colors(n_strategies)
 
-        # Row 3: Success Rate Impact
-        for strategy in results_df['strategy'].unique():
-            data = results_df[results_df['strategy'] == strategy]
-            axes[2,0].plot(data['success_rate'], data['final_accuracy'], 
-                        marker='o', label=strategy, linewidth=2)
-        axes[2,0].set_title('Accuracy by Success Rate')
-        axes[2,0].set_xlabel('Success Rate')
-        axes[2,0].set_ylabel('Final Accuracy (%)')
-        axes[2,0].grid(True, alpha=0.3)
-        axes[2,0].legend()
+            sns.barplot(
+                data=df,
+                x=x_col,
+                y=y_col,
+                hue='strategy',
+                ax=ax,
+                palette=palette,
+                errorbar=None  # or errorbar='sd' if you want standard deviation bars
+            )
+            ax.set_title(title)
+            ax.set_xlabel(x_label)
+            ax.set_ylabel(y_label)
+            ax.tick_params(axis='x', rotation=45)
+            ax.grid(True, alpha=0.3)
+            ax.legend()
 
-        for strategy in results_df['strategy'].unique():
-            data = results_df[results_df['strategy'] == strategy]
-            axes[2,1].plot(data['success_rate'], data['convergence_time'], 
-                        marker='o', label=strategy, linewidth=2)
-        axes[2,1].set_title('Convergence Time by Success Rate')
-        axes[2,1].set_xlabel('Success Rate')
-        axes[2,1].set_ylabel('Convergence Time (min)')
-        axes[2,1].grid(True, alpha=0.3)
-        axes[2,1].legend()
+        # Row 0: sensor_count
+        grouped_bar(
+            axes[0,0],
+            results_df,
+            x_col='sensor_count',
+            y_col='final_accuracy',
+            title='Accuracy by Sensor Count',
+            x_label='Number of Sensors',
+            y_label='Final Accuracy (%)'
+        )
+        grouped_bar(
+            axes[0,1],
+            results_df,
+            x_col='sensor_count',
+            y_col='convergence_time',
+            title='Convergence Time by Sensor Count',
+            x_label='Number of Sensors',
+            y_label='Convergence Time (min)'
+        )
+
+        # Row 1: grid_size
+        grouped_bar(
+            axes[1,0],
+            results_df,
+            x_col='grid_size',
+            y_col='final_accuracy',
+            title='Accuracy by Grid Size',
+            x_label='Grid Size',
+            y_label='Final Accuracy (%)'
+        )
+        grouped_bar(
+            axes[1,1],
+            results_df,
+            x_col='grid_size',
+            y_col='convergence_time',
+            title='Convergence Time by Grid Size',
+            x_label='Grid Size',
+            y_label='Convergence Time (min)'
+        )
+
+        # Row 2: success_rate
+        grouped_bar(
+            axes[2,0],
+            results_df,
+            x_col='success_rate',
+            y_col='final_accuracy',
+            title='Accuracy by Success Rate',
+            x_label='Success Rate',
+            y_label='Final Accuracy (%)'
+        )
+        grouped_bar(
+            axes[2,1],
+            results_df,
+            x_col='success_rate',
+            y_col='convergence_time',
+            title='Convergence Time by Success Rate',
+            x_label='Success Rate',
+            y_label='Convergence Time (min)'
+        )
 
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'dimension_impact.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
+        # ---------------------------------------------------------
         # 2. Strategy Performance Heatmaps
+        # ---------------------------------------------------------
         metrics = ['final_accuracy', 'convergence_time', 'avg_staleness']
         fig, axes = plt.subplots(len(metrics), 1, figsize=(15, 5*len(metrics)))
 
@@ -836,12 +883,15 @@ class TensorBoardAnalyzer:
         plt.savefig(os.path.join(output_dir, 'strategy_heatmaps.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
+        # ---------------------------------------------------------
         # 3. Parallel Coordinates Plot
+        # ---------------------------------------------------------
         plt.figure(figsize=(15, 8))
 
-        # Normaliza dados numéricos
+        # Normalize numeric columns for parallel coordinates
         normalized_df = results_df.copy()
-        for column in ['grid_size', 'sensor_count', 'success_rate', 'final_accuracy', 'convergence_time']:
+        numeric_cols = ['grid_size', 'sensor_count', 'success_rate', 'final_accuracy', 'convergence_time']
+        for column in numeric_cols:
             if column in normalized_df.columns:
                 min_val = normalized_df[column].min()
                 max_val = normalized_df[column].max()
@@ -853,7 +903,7 @@ class TensorBoardAnalyzer:
         pd.plotting.parallel_coordinates(
             normalized_df,
             'strategy',
-            cols=['grid_size', 'sensor_count', 'success_rate', 'final_accuracy', 'convergence_time'],
+            cols=numeric_cols,
             color=colors
         )
         plt.title('Strategy Performance Across All Dimensions')
@@ -1041,7 +1091,7 @@ class TensorBoardAnalyzer:
         </div>
 
         <div class="metric-card">
-            <h3>Dimension Breakdown (3 Plots)</h3>
+            <h3>Dimension Breakdown</h3>
             <p>For each dimension (Grid Size, Success Rate, # of Sensors), 
             we collapse the other dims, average the metrics, and plot 
             <strong>total_score</strong> (lower=better) across all strategies. 
