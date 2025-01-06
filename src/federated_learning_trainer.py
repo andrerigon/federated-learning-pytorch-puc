@@ -181,7 +181,6 @@ class FederatedLearningTrainer:
             self.logger.warning(f"No local model available for evaluation.")
 
         torch.cuda.empty_cache()
-        self.global_model.cpu()
         del self.global_model
 
         # Clean up the data loader

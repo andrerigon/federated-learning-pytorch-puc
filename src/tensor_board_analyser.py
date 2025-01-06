@@ -7,6 +7,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, List, Tuple
 import re
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
 
 class TensorBoardAnalyzer:
     def __init__(self, base_dir: str = '.'):
@@ -176,14 +179,18 @@ class TensorBoardAnalyzer:
         return pd.DataFrame(results)
 
     def generate_report(self, output_dir: str = 'analysis_results'):
-        """Generate comprehensive analysis report with fixed formatting."""
+        """Generate comprehensive analysis report."""
         os.makedirs(output_dir, exist_ok=True)
         print(f"\nGenerating report in {output_dir}")
         
         results_df = self.analyze_performance()
         
-        # Generate plots first
+        # Generate all plots
         self.plot_comparisons(results_df, output_dir)
+        self.plot_multidimensional_comparisons(results_df, output_dir)
+        
+        # Generate analysis
+        dimensional_analysis = self.generate_dimensional_analysis(results_df)
         
         # Format analysis tables
         def format_table(df, precision=3):
@@ -244,9 +251,10 @@ class TensorBoardAnalyzer:
                 }}
                 .metric-card {{
                     background-color: #f8f9fa;
-                    border-radius: 4px;
-                    padding: 15px;
-                    margin: 10px 0;
+                    border-radius: 8px;
+                    padding: 20px;
+                    margin: 20px 0;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 }}
                 .highlight {{
                     color: #2ecc71;
@@ -268,6 +276,23 @@ class TensorBoardAnalyzer:
                     color: #2c3e50;
                     margin: 10px 0;
                 }}
+                .table-wrapper {{
+                    overflow-x: auto;
+                    margin: 20px 0;
+                }}
+                .table-wrapper table {{
+                    min-width: 800px;
+                }}
+                .highlight-dimension {{
+                    font-weight: bold;
+                    color: #2980b9;
+                }}
+                .metric-card img {{
+                    width: 100%;
+                    max-width: 1000px;
+                    margin: 10px auto;
+                    display: block;
+                }}
             </style>
         </head>
         <body>
@@ -283,17 +308,44 @@ class TensorBoardAnalyzer:
             </div>
 
             <div class="section">
-                <h2>Strategy Performance Matrix</h2>
-                <img src="performance_matrix.png" alt="Performance Matrix">
-                <p>This matrix shows the key performance metrics across different strategies and sensor counts.</p>
-            </div>
-            
-            <div class="section">
-                <h2>Impact of Sensor Count</h2>
-                <img src="sensor_impact.png" alt="Sensor Impact Analysis">
-                <p>Analysis of how the number of sensors affects strategy performance.</p>
+                <h2>Multi-dimensional Analysis</h2>
+                
+                <div class="metric-card">
+                    <h3>Impact of Each Dimension</h3>
+                    <img src="dimension_impact.png" alt="Dimension Impact Analysis">
+                    <p>Analysis of how sensor count, grid size, and success rate affect performance metrics.</p>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>Performance Heatmaps</h3>
+                    <img src="strategy_heatmaps.png" alt="Strategy Performance Heatmaps">
+                    <p>Strategy performance across different configurations.</p>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>Multi-dimensional View</h3>
+                    <img src="parallel_coordinates.png" alt="Parallel Coordinates Plot">
+                    <p>Relationships between dimensions and performance metrics.</p>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>Dimensional Analysis Summary</h3>
+                    <div class="table-wrapper">
+                        {dimensional_analysis.pivot_table(
+                            index=['dimension', 'value'],
+                            columns='strategy',
+                            values=['avg_accuracy', 'avg_convergence_time']
+                        ).round(2).to_html()}
+                    </div>
+                </div>
             </div>
 
+            <div class="section">
+                <h2>Strategy Performance Matrix</h2>
+                <img src="performance_matrix.png" alt="Performance Matrix">
+                <p>Key performance metrics across different strategies and sensor counts.</p>
+            </div>
+            
             <div class="section">
                 <h2>Strategy Comparison</h2>
                 <img src="strategy_comparison.png" alt="Strategy Comparison">
@@ -302,11 +354,15 @@ class TensorBoardAnalyzer:
 
             <div class="section">
                 <h2>Detailed Performance Statistics</h2>
-                <h3>By Strategy and Sensor Count</h3>
-                {cross_table.to_html(classes='dataframe', float_format=lambda x: '{:.2f}'.format(x))}
+                <h3>By Strategy and Configuration</h3>
+                <div class="table-wrapper">
+                    {cross_table.to_html(classes='dataframe', float_format=lambda x: '{:.2f}'.format(x))}
+                </div>
                 
                 <h3>Overall Strategy Performance</h3>
-                {summary_by_strategy.to_html(classes='dataframe')}
+                <div class="table-wrapper">
+                    {summary_by_strategy.to_html(classes='dataframe')}
+                </div>
             </div>
         </body>
         </html>
@@ -317,7 +373,7 @@ class TensorBoardAnalyzer:
         
         # Save raw data
         results_df.to_csv(os.path.join(output_dir, 'full_results.csv'))
-        print("Analysis complete!")
+        print("Analysis complete!")    
 
     def _get_best_strategy(self, results_df: pd.DataFrame, metric: str) -> str:
         """Helper to find best strategy for a given metric with proper formatting."""
@@ -422,12 +478,43 @@ class TensorBoardAnalyzer:
         
         return best_configs
 
+    def get_colors(self, n: int):
+        """
+        Return a list of n distinct colors for plotting (bar/line graphs, etc.).
+
+        Uses:
+        - 'tab10' if n <= 10
+        - 'tab20' if n <= 20
+        - 'rainbow' if n > 20
+
+        Args:
+            n (int): number of colors needed
+
+        Returns:
+            list of str: List of hex color codes.
+        """
+        if n <= 0:
+            return []
+
+        if n <= 10:
+            cmap = plt.get_cmap('tab10')
+        elif n <= 20:
+            cmap = plt.get_cmap('tab20')
+        else:
+            # Fallback to a continuous colormap for large n
+            cmap = plt.get_cmap('rainbow')
+
+        # Sample the colormap in n evenly spaced intervals
+        indices = np.linspace(0, 1, n)
+        colors = [matplotlib.colors.to_hex(cmap(i)) for i in indices]
+        return colors
+
     def plot_comparisons(self, results_df: pd.DataFrame, output_dir: str):
         """Generate improved visualizations with better error handling."""
         plt.style.use('default')
         
         # Color scheme
-        colors = ['#2ecc71', '#3498db']
+        colors = self.get_colors(3)
         
         try:
             # 1. Performance Matrix
@@ -515,6 +602,157 @@ class TensorBoardAnalyzer:
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, 'fallback_plot.png'), dpi=300, bbox_inches='tight')
             plt.close()
+
+    def plot_multidimensional_comparisons(self, results_df: pd.DataFrame, output_dir: str):
+        """Generate comprehensive comparisons across all dimensions."""
+        plt.style.use('default')
+        colors = self.get_colors(3)
+        
+        # 1. Dimension Impact Analysis (3x2 grid)
+        fig, axes = plt.subplots(3, 2, figsize=(20, 24))
+        fig.suptitle('Impact Analysis Across All Dimensions', fontsize=16, y=0.95)
+        
+        # Row 1: Sensor Count Impact
+        for strategy in results_df['strategy'].unique():
+            data = results_df[results_df['strategy'] == strategy]
+            axes[0,0].plot(data['sensor_count'], data['final_accuracy'], 
+                        marker='o', label=strategy, linewidth=2)
+        axes[0,0].set_title('Accuracy by Sensor Count')
+        axes[0,0].set_xlabel('Number of Sensors')
+        axes[0,0].set_ylabel('Final Accuracy (%)')
+        axes[0,0].grid(True, alpha=0.3)
+        axes[0,0].legend()
+        
+        for strategy in results_df['strategy'].unique():
+            data = results_df[results_df['strategy'] == strategy]
+            axes[0,1].plot(data['sensor_count'], data['convergence_time'], 
+                        marker='o', label=strategy, linewidth=2)
+        axes[0,1].set_title('Convergence Time by Sensor Count')
+        axes[0,1].set_xlabel('Number of Sensors')
+        axes[0,1].set_ylabel('Convergence Time (min)')
+        axes[0,1].grid(True, alpha=0.3)
+        axes[0,1].legend()
+        
+        # Row 2: Grid Size Impact
+        for strategy in results_df['strategy'].unique():
+            data = results_df[results_df['strategy'] == strategy]
+            axes[1,0].plot(data['grid_size'], data['final_accuracy'], 
+                        marker='o', label=strategy, linewidth=2)
+        axes[1,0].set_title('Accuracy by Grid Size')
+        axes[1,0].set_xlabel('Grid Size')
+        axes[1,0].set_ylabel('Final Accuracy (%)')
+        axes[1,0].grid(True, alpha=0.3)
+        axes[1,0].legend()
+        
+        for strategy in results_df['strategy'].unique():
+            data = results_df[results_df['strategy'] == strategy]
+            axes[1,1].plot(data['grid_size'], data['convergence_rate'], 
+                        marker='o', label=strategy, linewidth=2)
+        axes[1,1].set_title('Convergence Rate by Grid Size')
+        axes[1,1].set_xlabel('Grid Size')
+        axes[1,1].set_ylabel('Convergence Rate')
+        axes[1,1].grid(True, alpha=0.3)
+        axes[1,1].legend()
+        
+        # Row 3: Success Rate Impact
+        for strategy in results_df['strategy'].unique():
+            data = results_df[results_df['strategy'] == strategy]
+            axes[2,0].plot(data['success_rate'], data['final_accuracy'], 
+                        marker='o', label=strategy, linewidth=2)
+        axes[2,0].set_title('Accuracy by Success Rate')
+        axes[2,0].set_xlabel('Success Rate')
+        axes[2,0].set_ylabel('Final Accuracy (%)')
+        axes[2,0].grid(True, alpha=0.3)
+        axes[2,0].legend()
+        
+        for strategy in results_df['strategy'].unique():
+            data = results_df[results_df['strategy'] == strategy]
+            axes[2,1].plot(data['success_rate'], data['convergence_time'], 
+                        marker='o', label=strategy, linewidth=2)
+        axes[2,1].set_title('Convergence Time by Success Rate')
+        axes[2,1].set_xlabel('Success Rate')
+        axes[2,1].set_ylabel('Convergence Time (min)')
+        axes[2,1].grid(True, alpha=0.3)
+        axes[2,1].legend()
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'dimension_impact.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # 2. Strategy Performance Heatmaps
+        metrics = ['final_accuracy', 'convergence_time', 'convergence_rate']
+        fig, axes = plt.subplots(len(metrics), 1, figsize=(15, 5*len(metrics)))
+        
+        for idx, metric in enumerate(metrics):
+            pivot_data = pd.pivot_table(
+                results_df,
+                values=metric,
+                index='strategy',
+                columns=['sensor_count', 'grid_size'],
+                aggfunc='mean'
+            )
+            
+            sns.heatmap(pivot_data, ax=axes[idx], cmap='YlOrRd', annot=True, fmt='.2f')
+            axes[idx].set_title(f'{metric.replace("_", " ").title()} Heatmap')
+            
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'strategy_heatmaps.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # 3. Parallel Coordinates Plot
+        plt.figure(figsize=(15, 8))
+        
+        # Normalize the data for parallel coordinates
+        normalized_df = results_df.copy()
+        for column in ['grid_size', 'sensor_count', 'success_rate', 'final_accuracy', 'convergence_time']:
+            if column in normalized_df.columns:
+                min_val = normalized_df[column].min()
+                max_val = normalized_df[column].max()
+                normalized_df[column] = (normalized_df[column] - min_val) / (max_val - min_val)
+        
+        # Create parallel coordinates plot
+        pd.plotting.parallel_coordinates(
+            normalized_df,
+            'strategy',
+            cols=['grid_size', 'sensor_count', 'success_rate', 'final_accuracy', 'convergence_time'],
+            color=colors
+        )
+        plt.title('Strategy Performance Across All Dimensions')
+        plt.grid(True, alpha=0.3)
+        plt.xticks(rotation=30)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'parallel_coordinates.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def generate_dimensional_analysis(self, results_df: pd.DataFrame) -> pd.DataFrame:
+        """Generate analysis of performance across all dimensions."""
+        
+        dimensions = {
+            'sensor_count': results_df['sensor_count'].unique(),
+            'grid_size': results_df['grid_size'].unique(),
+            'success_rate': results_df['success_rate'].unique()
+        }
+        
+        analysis = []
+        
+        for dim_name, dim_values in dimensions.items():
+            for value in dim_values:
+                subset = results_df[results_df[dim_name] == value]
+                
+                for strategy in subset['strategy'].unique():
+                    strategy_data = subset[subset['strategy'] == strategy]
+                    
+                    analysis.append({
+                        'dimension': dim_name,
+                        'value': value,
+                        'strategy': strategy,
+                        'avg_accuracy': strategy_data['final_accuracy'].mean(),
+                        'avg_convergence_time': strategy_data['convergence_time'].mean(),
+                        'avg_convergence_rate': strategy_data['convergence_rate'].mean()
+                    })
+        
+        return pd.DataFrame(analysis)
             
 def main():
     analyzer = TensorBoardAnalyzer('./runs')
