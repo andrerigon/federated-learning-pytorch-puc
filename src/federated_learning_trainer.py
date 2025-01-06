@@ -180,14 +180,6 @@ class FederatedLearningTrainer:
         else:
             self.logger.warning(f"No local model available for evaluation.")
 
-        torch.cuda.empty_cache()
-        del self.global_model
-
-        # Clean up the data loader
-        if hasattr(self.loader, '_iterator'):
-            self.loader._iterator = None  # Break reference cycle if any
-        del self.loader  # Remove data loader to free memory
-
         # Flush metrics (write to TensorBoard and generate plots)
         self.metrics_logger.flush()
 

@@ -15,13 +15,30 @@ class TensorBoardAnalyzer:
     def __init__(self, base_dir: str = '.'):
         self.base_dir = base_dir
         self.scenarios = self._get_scenarios()
+
+        # Estrutura de dados para armazenar séries de métricas
+        # self.metrics_data[scenario][strategy][tag] = lista de (wall_time, value)
         self.metrics_data = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+
+        # Estrutura para armazenar hparams finais
+        # self.hparams_data[scenario][strategy] = dict com { 'hparam/final_accuracy': valor, ... }
+        self.hparams_data = defaultdict(lambda: defaultdict(dict))
+
         print(f"Found scenarios: {self.scenarios}")
 
     def _get_scenarios(self) -> List[str]:
-        return [f"{self.base_dir}/{d}" for d in os.listdir(self.base_dir) if d.startswith('runs_')]
+        return [
+            f"{self.base_dir}/{d}"
+            for d in os.listdir(self.base_dir)
+            if d.startswith('runs_')
+        ]
 
     def _extract_scenario_params(self, scenario: str) -> Tuple[int, int, float]:
+        """
+        Extrai grid_size, sensor_count e success_rate do nome do diretório,
+        ex.: runs_500x500_s10_sr0.9 => (500, 10, 0.9).
+        Se não encontrar, retorna (0,0,0).
+        """
         grid_match = re.search(r'(\d+)x\d+', scenario)
         sensor_match = re.search(r'_s(\d+)_', scenario)
         sr_match = re.search(r'sr(\d+\.\d+)', scenario)
@@ -33,53 +50,96 @@ class TensorBoardAnalyzer:
         return grid_size, sensor_count, success_rate
 
     def _parse_event_file(self, event_file: str) -> Dict:
+        """
+        Lê um arquivo de eventos do TensorBoard e retorna um dicionário
+        com as séries de métricas e também os hparams (se existirem).
+          {
+            <tag1>: [(time1, value1), (time2, value2), ...],
+            ...
+            "hparams": {
+                'hparam/final_accuracy': <valor>,
+                'hparam/convergence_time': <valor>,
+                ...
+            }
+          }
+        """
         metrics = defaultdict(list)
+        metrics["hparams"] = {}
+
         try:
             for event in summary_iterator(event_file):
                 for value in event.summary.value:
                     if hasattr(value, 'simple_value'):
-                        metrics[value.tag].append((event.wall_time, value.simple_value))
+                        # Se for um hparam (tag começa com "hparam/"), salvamos num dict separado
+                        if value.tag.startswith('hparam/'):
+                            metrics["hparams"][value.tag] = value.simple_value
+                        else:
+                            # Caso contrário, armazenamos na lista da métrica
+                            metrics[value.tag].append((event.wall_time, value.simple_value))
         except Exception as e:
             print(f"Error reading {event_file}: {e}")
+
         return metrics
 
     def process_logs(self):
+        """
+        Varre todos os cenários e estratégias, lê os arquivos do TensorBoard,
+        e armazena tanto as séries de métricas (self.metrics_data) quanto os
+        hparams (self.hparams_data).
+        """
         print("Processing logs...")
         
         for scenario in self.scenarios:
             print(f"\nProcessing scenario: {scenario}")
-            _, sensor_count, _ = self._extract_scenario_params(scenario)  # sensor_count will be 7
-            tb_path = os.path.join(scenario, 'tensorboard', f'aggregator_{sensor_count}')  # .../tensorboard/aggregator_7            
-            
+            _, sensor_count, _ = self._extract_scenario_params(scenario)
+
+            # Exemplo: .../runs_500x500_s10_sr0.9/tensorboard/aggregator_10
+            tb_path = os.path.join(scenario, 'tensorboard', f'aggregator_{sensor_count}')
+
+            if not os.path.exists(tb_path):
+                print(f"Path {tb_path} not found. Skipping.")
+                continue
+
             try:
                 for strategy in os.listdir(tb_path):
-                    if strategy.endswith('Strategy'):
-                        strategy_path = os.path.join(tb_path, strategy)
-                        run_dirs = [d for d in os.listdir(strategy_path) if d.startswith('run_')]
-                        
-                        for run_dir in run_dirs:
-                            run_path = os.path.join(strategy_path, run_dir)
-                            event_files = []
-                            for root, _, files in os.walk(run_path):
-                                event_files.extend([
-                                    os.path.join(root, f) 
-                                    for f in files 
-                                    if f.startswith('events.out.tfevents')
-                                ])
-                            
-                            for event_file in event_files:
-                                metrics = self._parse_event_file(event_file)
-                                for tag, values in metrics.items():
-                                    if values:
-                                        self.metrics_data[scenario][strategy][tag].extend(values)
-            
+                    # Filtra pastas de estratégias
+                    if not strategy.endswith('Strategy'):
+                        continue
+
+                    strategy_path = os.path.join(tb_path, strategy)
+                    run_dirs = [
+                        d for d in os.listdir(strategy_path)
+                        if d.startswith('run_') and os.path.isdir(os.path.join(strategy_path, d))
+                    ]
+
+                    for run_dir in run_dirs:
+                        run_path = os.path.join(strategy_path, run_dir)
+                        event_files = []
+                        for root, _, files in os.walk(run_path):
+                            for f in files:
+                                if f.startswith('events.out.tfevents'):
+                                    event_files.append(os.path.join(root, f))
+
+                        for event_file in event_files:
+                            parsed_metrics = self._parse_event_file(event_file)
+
+                            # Armazena as séries (ex.: "Evaluation/accuracy")
+                            for tag, values in parsed_metrics.items():
+                                if tag == "hparams":
+                                    continue
+                                self.metrics_data[scenario][strategy][tag].extend(values)
+
+                            # Armazena hparams
+                            for hparam_key, hparam_val in parsed_metrics["hparams"].items():
+                                self.hparams_data[scenario][strategy][hparam_key] = hparam_val
+
             except Exception as e:
                 print(f"Error processing {scenario}: {e}")
 
     def calculate_strategy_ranking(self, results_df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate detailed strategy rankings across all dimensions."""
+        """Exemplo de ranking detalhado das estratégias (mantido do seu código original)."""
         
-        # Define metrics and their weights
+        # Define métricas e pesos
         metrics = {
             'convergence_time': {'weight': 0.3, 'higher_better': False},
             'convergence_rate': {'weight': 0.2, 'higher_better': True},
@@ -88,7 +148,6 @@ class TensorBoardAnalyzer:
             'accuracy_stability': {'weight': 0.1, 'higher_better': False}
         }
         
-        # Group by all dimensions
         dimensions = ['strategy', 'sensor_count', 'grid_size', 'success_rate']
         grouped_stats = results_df.groupby(dimensions).agg({
             'convergence_time': 'mean',
@@ -98,7 +157,6 @@ class TensorBoardAnalyzer:
             'accuracy_stability': 'mean'
         }).round(3)
         
-        # Calculate ranks for each metric
         ranks = pd.DataFrame()
         for metric, config in metrics.items():
             if metric in grouped_stats.columns:
@@ -106,113 +164,159 @@ class TensorBoardAnalyzer:
                 ranks[f'{metric}_rank'] = grouped_stats[metric].rank(ascending=ascending)
                 ranks[f'{metric}_rank'] = ranks[f'{metric}_rank'] * config['weight']
         
-        # Calculate overall rank
         ranks['overall_rank'] = ranks.mean(axis=1)
-        
-        # Combine original values with ranks
+
+        # Adiciona colunas "raw"
         for metric in metrics.keys():
             if metric in grouped_stats.columns:
                 ranks[f'{metric}_raw'] = grouped_stats[metric]
         
         return ranks.sort_values('overall_rank')
-    
+
     def analyze_performance(self) -> pd.DataFrame:
-        """Analyze performance across all scenarios and strategies."""
+        """
+        Analisa o desempenho cruzando tanto os hparams salvos (se existirem)
+        quanto as séries de métricas (ex.: Evaluation/accuracy).
+        Retorna um DataFrame com colunas relevantes.
+        """
         results = []
-        
+
         for scenario in self.metrics_data:
             grid_size, sensor_count, success_rate = self._extract_scenario_params(scenario)
-            
+
             for strategy in self.metrics_data[scenario]:
                 strategy_name = strategy.replace('Strategy', '')
                 metrics = self.metrics_data[scenario][strategy]
-                
+
+                # --------------------------------------------
+                # 1) Tentamos ler métricas do hparams (final)
+                # --------------------------------------------
+                final_acc_h = self.hparams_data[scenario][strategy].get('hparam/final_accuracy', None)
+                conv_time_h = self.hparams_data[scenario][strategy].get('hparam/convergence_time', None)
+                total_updates_h = self.hparams_data[scenario][strategy].get('hparam/total_updates', None)
+                avg_staleness_h = self.hparams_data[scenario][strategy].get('hparam/avg_staleness', None)
+                success_rate_h = self.hparams_data[scenario][strategy].get('hparam/success_rate', None)
+
+                # Convertemos para float/int
+                if final_acc_h is not None:
+                    final_acc_h = float(final_acc_h)
+                if conv_time_h is not None:
+                    conv_time_h = float(conv_time_h) / 60.0  # converte para minutos
+                if total_updates_h is not None:
+                    total_updates_h = int(total_updates_h)
+                if avg_staleness_h is not None:
+                    avg_staleness_h = float(avg_staleness_h)
+                if success_rate_h is not None:
+                    success_rate_h = float(success_rate_h)
+
+                # --------------------------------------------
+                # 2) Analisamos também as séries de métricas
+                #    (caso não existam hparams ou se quiser complementar)
+                # --------------------------------------------
                 accuracy_data = metrics.get('Evaluation/accuracy', [])
                 loss_data = metrics.get('Evaluation/loss', [])
                 staleness_data = metrics.get('Staleness/Value', [])
-                
-                if not accuracy_data:
-                    continue
 
-                # Sort time series data
-                accuracy_times, accuracies = zip(*sorted(accuracy_data))
-                
-                # Calculate primary metrics
-                final_acc = accuracies[-1]
-                peak_acc = max(accuracies)
-                convergence_time = len(accuracies) * 5 / 60  # minutes
-                
-                # Calculate convergence metrics
-                time_to_90_peak = None
-                time_to_95_peak = None
-                accuracy_stability = np.std(accuracies[-10:]) if len(accuracies) >= 10 else None
-                
-                for idx, acc in enumerate(accuracies):
-                    if acc >= 0.9 * peak_acc and time_to_90_peak is None:
-                        time_to_90_peak = idx * 5 / 60
-                    if acc >= 0.95 * peak_acc and time_to_95_peak is None:
-                        time_to_95_peak = idx * 5 / 60
+                # Ordena pelas wall_time
+                accuracy_data_sorted = sorted(accuracy_data, key=lambda x: x[0])
 
-                # Calculate convergence rate
-                convergence_rate = (final_acc - accuracies[0]) / convergence_time if convergence_time > 0 else 0
-                
-                # Calculate additional metrics
-                loss = np.mean([v for _, v in loss_data]) if loss_data else None
-                staleness = np.mean([v for _, v in staleness_data]) if staleness_data else None
-                
+                # Caso não tenhamos final_accuracy nos hparams, tentamos a última accuracy
+                if final_acc_h is None and accuracy_data_sorted:
+                    final_acc_h = accuracy_data_sorted[-1][1]
+
+                # Exemplo de cálculo de convergência
+                final_acc = None
+                peak_acc = None
+                convergence_time = None
+                if accuracy_data_sorted:
+                    accuracy_times, accuracies = zip(*accuracy_data_sorted)
+                    final_acc = accuracies[-1]
+                    peak_acc = max(accuracies)
+                    convergence_time = len(accuracies) * 5.0 / 60.0
+
+                # Fallback se hparams não existirem
+                if final_acc_h is None:
+                    final_acc_h = final_acc
+                if conv_time_h is None:
+                    conv_time_h = convergence_time
+
+                convergence_rate = None
+                if accuracy_data_sorted:
+                    accuracy_times, accuracies = zip(*accuracy_data_sorted)
+                    final_acc = accuracies[-1]
+                    start_acc = accuracies[0]
+                    if conv_time_h and conv_time_h > 0:
+                        # Exemplo: (final - inicial) / (tempo total em minutos)
+                        convergence_rate = (final_acc - start_acc) / conv_time_h
+                else:
+                    final_acc = None                        
+
                 results.append({
+                    'scenario': os.path.basename(scenario),
                     'grid_size': grid_size,
                     'sensor_count': sensor_count,
                     'success_rate': success_rate,
                     'strategy': strategy_name,
-                    'convergence_time': convergence_time,
-                    'time_to_90_peak': time_to_90_peak,
-                    'time_to_95_peak': time_to_95_peak,
+
+                    # Métricas calculadas "na mão"
+                    'final_accuracy_calc': final_acc,
+                    'peak_accuracy_calc': peak_acc,
+                    'convergence_time_calc': convergence_time,
                     'convergence_rate': convergence_rate,
-                    'accuracy_stability': accuracy_stability,
-                    'final_accuracy': final_acc,
-                    'peak_accuracy': peak_acc,
-                    'avg_loss': loss,
-                    'avg_staleness': staleness
+
+                    # Métricas via hparams (preferencial)
+                    'final_accuracy': final_acc_h,
+                    'convergence_time': conv_time_h,
+                    'total_updates': total_updates_h,
+                    'avg_staleness': avg_staleness_h,
+                    'hparam_success_rate': success_rate_h
                 })
-        
+
         return pd.DataFrame(results)
 
     def generate_report(self, output_dir: str = 'analysis_results'):
-        """Generate comprehensive analysis report."""
+        """Gera relatórios e salva gráficos, HTML e CSV de resultados (com HTML original mantido)."""
         os.makedirs(output_dir, exist_ok=True)
         print(f"\nGenerating report in {output_dir}")
         
         results_df = self.analyze_performance()
         
-        # Generate all plots
+        # Gere os gráficos
         self.plot_comparisons(results_df, output_dir)
         self.plot_multidimensional_comparisons(results_df, output_dir)
         
-        # Generate analysis
-        dimensional_analysis = self.generate_dimensional_analysis(results_df)
-        
-        # Format analysis tables
-        def format_table(df, precision=3):
-            """Helper to format tables consistently"""
-            return df.round(precision).fillna("N/A").applymap(lambda x: f"{x:.2f}" if isinstance(x, float) else x)
-        
-        # Generate summary tables with better formatting
-        best_configs = self.get_best_configurations(results_df)
-        summary_by_strategy = format_table(results_df.groupby('strategy').agg({
-            'convergence_time': ['mean', 'min', 'max'],
-            'final_accuracy': ['mean', 'min', 'max'],
-            'convergence_rate': ['mean', 'min', 'max']
-        }))
+        quick_summary_html = self.generate_quick_summary_html(results_df, output_dir)
 
-        # Create more readable cross-comparison table
+        # Gera análise dimensional
+        dimensional_analysis = self.generate_dimensional_analysis(results_df)
+
+        # Formatador de tabelas
+        def format_table(df, precision=3):
+            return df.round(precision).fillna("N/A").applymap(
+                lambda x: f"{x:.2f}" if isinstance(x, float) else x
+            )
+
+        # Exemplo de "best_configs"
+        best_configs = self.get_best_configurations(results_df)
+        # Exemplo de summary_by_strategy
+        summary_by_strategy = format_table(
+            results_df.groupby('strategy').agg({
+                'convergence_time': ['mean', 'min', 'max'],
+                'final_accuracy': ['mean', 'min', 'max'],
+                'convergence_time_calc': ['mean'],
+                'final_accuracy_calc': ['mean']
+            })
+        )
+
+        # Exemplo de cross_table
         cross_table = pd.pivot_table(
             results_df,
-            values=['convergence_time', 'final_accuracy', 'convergence_rate'],
+            values=['convergence_time', 'final_accuracy', 'total_updates'],
             index=['strategy', 'sensor_count'],
             aggfunc=['mean', 'std']
         ).round(3)
-        
+
+        # ---- AQUI ESTÁ O HTML ORIGINAL ----
         html_content = f"""
         <html>
         <head>
@@ -298,14 +402,7 @@ class TensorBoardAnalyzer:
         <body>
             <h1>Federated Learning Strategy Analysis Report</h1>
             
-            <div class="section">
-                <h2>Summary of Findings</h2>
-                <div class="metric-card">
-                    <div class="key-metric">🎯 Best Overall Strategy (Accuracy): <span class="highlight">{self._get_best_strategy(results_df, 'final_accuracy')}</span></div>
-                    <div class="key-metric">⚡ Fastest Convergence: <span class="highlight">{self._get_best_strategy(results_df, 'convergence_time')}</span></div>
-                    <div class="key-metric">📈 Best Convergence Rate: <span class="highlight">{self._get_best_strategy(results_df, 'convergence_rate')}</span></div>
-                </div>
-            </div>
+            {quick_summary_html}
 
             <div class="section">
                 <h2>Multi-dimensional Analysis</h2>
@@ -367,26 +464,34 @@ class TensorBoardAnalyzer:
         </body>
         </html>
         """
-        
+
         with open(os.path.join(output_dir, 'analysis_report.html'), 'w') as f:
             f.write(html_content)
         
-        # Save raw data
-        results_df.to_csv(os.path.join(output_dir, 'full_results.csv'))
-        print("Analysis complete!")    
+        # Salva CSV de resultados completos
+        results_df.to_csv(os.path.join(output_dir, 'full_results.csv'), index=False)
+        print("Analysis complete! HTML report generated.")
 
     def _get_best_strategy(self, results_df: pd.DataFrame, metric: str) -> str:
-        """Helper to find best strategy for a given metric with proper formatting."""
+        """Acha a melhor estratégia para o metric indicado."""
+        # Se for converge_time, a menor é melhor
         if metric == 'convergence_time':
+            # Evita erro se dataframe vazio
+            if results_df.empty or results_df[metric].isna().all():
+                return "N/A"
             idx = results_df.groupby('strategy')[metric].mean().idxmin()
             value = results_df.groupby('strategy')[metric].mean().min()
         else:
+            # Demais métricas => maior é melhor
+            if results_df.empty or results_df[metric].isna().all():
+                return "N/A"
             idx = results_df.groupby('strategy')[metric].mean().idxmax()
             value = results_df.groupby('strategy')[metric].mean().max()
         
         return f"{idx} (avg {value:.2f})"
 
     def _get_best_performer_html(self, rankings):
+        """Retorna HTML indicando a melhor estratégia (ranking)."""
         best_strategy = rankings.index[0]
         return f"""
         <p>Best overall strategy: <strong>{best_strategy}</strong></p>
@@ -394,7 +499,13 @@ class TensorBoardAnalyzer:
         """
 
     def _get_fastest_convergence_html(self, results_df):
-        fastest = results_df.loc[results_df['convergence_time'].idxmin()]
+        """Acha a menor converge_time."""
+        if results_df.empty:
+            return "<p>No data available</p>"
+        fastest_idx = results_df['convergence_time'].idxmin()
+        if pd.isna(fastest_idx):
+            return "<p>No data available</p>"
+        fastest = results_df.loc[fastest_idx]
         return f"""
         <p>Strategy: <strong>{fastest['strategy']}</strong></p>
         <p>Convergence Time: {fastest['convergence_time']:.2f} minutes</p>
@@ -402,7 +513,13 @@ class TensorBoardAnalyzer:
         """
 
     def _get_highest_accuracy_html(self, results_df):
-        most_accurate = results_df.loc[results_df['final_accuracy'].idxmax()]
+        """Acha a maior final_accuracy."""
+        if results_df.empty:
+            return "<p>No data available</p>"
+        highest_idx = results_df['final_accuracy'].idxmax()
+        if pd.isna(highest_idx):
+            return "<p>No data available</p>"
+        most_accurate = results_df.loc[highest_idx]
         return f"""
         <p>Strategy: <strong>{most_accurate['strategy']}</strong></p>
         <p>Accuracy: {most_accurate['final_accuracy']:.2f}%</p>
@@ -410,88 +527,79 @@ class TensorBoardAnalyzer:
         """
 
     def generate_comparison_tables(self, results_df: pd.DataFrame) -> dict:
-        """Generate detailed comparison tables across all dimensions."""
-        
+        """Gera tabelas de comparação em diferentes dimensões."""
         tables = {}
         
-        # 1. Strategy comparison by sensor count
+        # 1. Strategy vs Sensor Count
         tables['by_sensor'] = results_df.groupby(['strategy', 'sensor_count']).agg({
             'convergence_time': ['mean', 'std'],
             'final_accuracy': ['mean', 'std'],
-            'convergence_rate': ['mean', 'std'],
-            'time_to_95_peak': ['mean', 'std']
+            'total_updates': ['mean', 'std']
         }).round(3)
         
-        # 2. Strategy comparison by grid size
+        # 2. Strategy vs Grid Size
         tables['by_grid'] = results_df.groupby(['strategy', 'grid_size']).agg({
             'convergence_time': ['mean', 'std'],
             'final_accuracy': ['mean', 'std'],
-            'convergence_rate': ['mean', 'std'],
-            'time_to_95_peak': ['mean', 'std']
+            'total_updates': ['mean', 'std']
         }).round(3)
         
-        # 3. Strategy comparison by success rate
+        # 3. Strategy vs Success Rate
         tables['by_sr'] = results_df.groupby(['strategy', 'success_rate']).agg({
             'convergence_time': ['mean', 'std'],
             'final_accuracy': ['mean', 'std'],
-            'convergence_rate': ['mean', 'std'],
-            'time_to_95_peak': ['mean', 'std']
+            'total_updates': ['mean', 'std']
         }).round(3)
         
-        # 4. Full comparison across all dimensions
+        # 4. Full
         tables['full'] = results_df.groupby(['strategy', 'sensor_count', 'grid_size', 'success_rate']).agg({
             'convergence_time': ['mean', 'std'],
             'final_accuracy': ['mean', 'std'],
-            'convergence_rate': ['mean', 'std'],
-            'time_to_95_peak': ['mean', 'std']
+            'total_updates': ['mean', 'std']
         }).round(3)
         
         return tables
-    
+
     def get_best_configurations(self, results_df: pd.DataFrame) -> pd.DataFrame:
-        """Find best configurations for each strategy with proper formatting."""
+        """Procura as melhores configs para cada estratégia."""
         metrics = {
-            'convergence_time': {'better': 'min', 'name': 'Convergence Time'},
-            'final_accuracy': {'better': 'max', 'name': 'Final Accuracy'},
-            'convergence_rate': {'better': 'max', 'name': 'Convergence Rate'}
+            'convergence_time': {'better': 'min'},
+            'final_accuracy': {'better': 'max'},
+            'total_updates': {'better': 'min'}
         }
         
         best_configs = pd.DataFrame()
         
         for metric, config in metrics.items():
+            if metric not in results_df.columns or results_df.empty:
+                continue
+
+            group = results_df.groupby('strategy')[metric]
             if config['better'] == 'min':
-                idx = results_df.groupby('strategy')[metric].idxmin()
+                idx = group.idxmin()
             else:
-                idx = results_df.groupby('strategy')[metric].idxmax()
+                idx = group.idxmax()
                 
-            best_for_metric = results_df.loc[idx]
+            best_for_metric = results_df.loc[idx.dropna()]
             
-            best_configs[f'best_{metric}'] = best_for_metric.set_index('strategy')[metric]
-            best_configs[f'best_{metric}_config'] = best_for_metric.apply(
+            col_best_metric = f'best_{metric}'
+            col_best_config = f'best_{metric}_config'
+            best_configs[col_best_metric] = best_for_metric.set_index('strategy')[metric]
+            best_configs[col_best_config] = best_for_metric.apply(
                 lambda x: f"sensors={x['sensor_count']}, grid={x['grid_size']}, sr={x['success_rate']:.1f}", 
                 axis=1
             )
         
-        # Format numeric columns
-        for metric in metrics:
-            best_configs[f'best_{metric}'] = best_configs[f'best_{metric}'].map('{:.2f}'.format)
+        # Formata numeric columns
+        for col in best_configs.columns:
+            if 'best_' in col and '_config' not in col:
+                best_configs[col] = best_configs[col].map('{:.2f}'.format)
         
         return best_configs
 
     def get_colors(self, n: int):
         """
-        Return a list of n distinct colors for plotting (bar/line graphs, etc.).
-
-        Uses:
-        - 'tab10' if n <= 10
-        - 'tab20' if n <= 20
-        - 'rainbow' if n > 20
-
-        Args:
-            n (int): number of colors needed
-
-        Returns:
-            list of str: List of hex color codes.
+        Retorna lista de n cores distintas para uso em gráficos.
         """
         if n <= 0:
             return []
@@ -501,65 +609,74 @@ class TensorBoardAnalyzer:
         elif n <= 20:
             cmap = plt.get_cmap('tab20')
         else:
-            # Fallback to a continuous colormap for large n
             cmap = plt.get_cmap('rainbow')
 
-        # Sample the colormap in n evenly spaced intervals
         indices = np.linspace(0, 1, n)
         colors = [matplotlib.colors.to_hex(cmap(i)) for i in indices]
         return colors
 
     def plot_comparisons(self, results_df: pd.DataFrame, output_dir: str):
-        """Generate improved visualizations with better error handling."""
+        """
+        Gera plots comparativos, incluindo o novo plot de total_updates.
+        """
         plt.style.use('default')
-        
-        # Color scheme
-        colors = self.get_colors(3)
-        
+
+        # Evita problemas com NaN
+        df = results_df.copy()
+
+        # 1. Performance Matrix (4 subplots)
         try:
-            # 1. Performance Matrix
             fig, axes = plt.subplots(2, 2, figsize=(15, 12))
             fig.suptitle('Strategy Performance Matrix', fontsize=16, y=1.02)
             
-            metrics = {
+            metrics_dict = {
                 (0,0): ('convergence_time', 'Convergence Time (min)'),
                 (0,1): ('final_accuracy', 'Final Accuracy (%)'),
-                (1,0): ('convergence_rate', 'Convergence Rate'),
-                (1,1): ('time_to_95_peak', 'Time to 95% Peak (min)')
+                (1,0): ('avg_staleness', 'Average Staleness'),
+                (1,1): ('total_updates', 'Total Updates'),
             }
             
-            for (i,j), (metric, title) in metrics.items():
-                sns.barplot(data=results_df, x='strategy', y=metric, 
-                        hue='sensor_count', palette=colors,
-                        ax=axes[i,j], errorbar=None)
+            color_list = self.get_colors(len(df['sensor_count'].unique()))
+
+            for (i,j), (metric, title) in metrics_dict.items():
+                sns.barplot(
+                    data=df,
+                    x='strategy',
+                    y=metric,
+                    hue='sensor_count',
+                    palette=color_list,
+                    ax=axes[i,j],
+                    errorbar=None
+                )
                 axes[i,j].set_title(title)
                 axes[i,j].tick_params(axis='x', rotation=45)
                 
-                # Add value labels
                 for container in axes[i,j].containers:
                     axes[i,j].bar_label(container, fmt='%.2f')
             
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, 'performance_matrix.png'), dpi=300, bbox_inches='tight')
             plt.close()
+        except Exception as e:
+            print(f"Error generating 'performance_matrix.png': {e}")
 
-            # 2. Sensor Impact Analysis
+        # 2. Sensor Impact
+        try:
             plt.figure(figsize=(15, 6))
             
-            metrics = ['final_accuracy', 'convergence_rate']
+            metrics_list = ['final_accuracy', 'convergence_time']
             fig, axes = plt.subplots(1, 2, figsize=(15, 6))
             
-            for idx, metric in enumerate(metrics):
-                for strategy in results_df['strategy'].unique():
-                    data = results_df[results_df['strategy'] == strategy]
+            for idx, metric in enumerate(metrics_list):
+                for strategy in df['strategy'].unique():
+                    data = df[df['strategy'] == strategy]
                     axes[idx].plot(data['sensor_count'], data[metric], 
-                                marker='o', label=strategy, linewidth=2)
-                    
-                    # Add value labels
+                                   marker='o', label=strategy, linewidth=2)
                     for x, y in zip(data['sensor_count'], data[metric]):
-                        axes[idx].annotate(f'{y:.1f}', (x, y), 
-                                        textcoords="offset points",
-                                        xytext=(0,10), ha='center')
+                        if pd.notnull(y):
+                            axes[idx].annotate(f'{y:.2f}', (x, y),
+                                               textcoords="offset points",
+                                               xytext=(0,10), ha='center')
                 
                 axes[idx].set_title(f'{metric.replace("_", " ").title()} vs Sensor Count')
                 axes[idx].grid(True, alpha=0.3)
@@ -568,20 +685,25 @@ class TensorBoardAnalyzer:
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, 'sensor_impact.png'), dpi=300, bbox_inches='tight')
             plt.close()
+        except Exception as e:
+            print(f"Error generating 'sensor_impact.png': {e}")
 
-            # 3. Strategy Comparison (Scatter plot)
+        # 3. Scatter comparando convergência e acurácia
+        try:
             plt.figure(figsize=(12, 8))
             
-            for strategy in results_df['strategy'].unique():
-                data = results_df[results_df['strategy'] == strategy]
+            for strategy in df['strategy'].unique():
+                data = df[df['strategy'] == strategy]
                 plt.scatter(data['convergence_time'], data['final_accuracy'],
-                        label=strategy, s=100, alpha=0.7)
-                
-                # Add annotations
+                            label=strategy, s=100, alpha=0.7)
                 for _, row in data.iterrows():
-                    plt.annotate(f"s={row['sensor_count']}", 
+                    if pd.notnull(row['convergence_time']) and pd.notnull(row['final_accuracy']):
+                        plt.annotate(
+                            f"s={row['sensor_count']}",
                             (row['convergence_time'], row['final_accuracy']),
-                            xytext=(5, 5), textcoords='offset points')
+                            xytext=(5,5),
+                            textcoords='offset points'
+                        )
             
             plt.xlabel('Convergence Time (minutes)')
             plt.ylabel('Final Accuracy (%)')
@@ -592,27 +714,22 @@ class TensorBoardAnalyzer:
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, 'strategy_comparison.png'), dpi=300, bbox_inches='tight')
             plt.close()
-
         except Exception as e:
-            print(f"Error generating plots: {e}")
-            # Create a simple fallback plot if the main ones fail
-            plt.figure(figsize=(10, 6))
-            sns.barplot(data=results_df, x='strategy', y='final_accuracy', hue='sensor_count')
-            plt.title('Strategy Performance (Fallback Plot)')
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, 'fallback_plot.png'), dpi=300, bbox_inches='tight')
-            plt.close()
+            print(f"Error generating 'strategy_comparison.png': {e}")
 
     def plot_multidimensional_comparisons(self, results_df: pd.DataFrame, output_dir: str):
-        """Generate comprehensive comparisons across all dimensions."""
+        """
+        Gera comparações mais amplas, incluindo heatmaps e parallel coordinates,
+        mantendo a estrutura original.
+        """
         plt.style.use('default')
         colors = self.get_colors(3)
-        
+
         # 1. Dimension Impact Analysis (3x2 grid)
         fig, axes = plt.subplots(3, 2, figsize=(20, 24))
-        fig.suptitle('Impact Analysis Across All Dimensions', fontsize=16, y=0.95)
-        
-        # Row 1: Sensor Count Impact
+        fig.suptitle('Impact Analysis Across All Dimensions', fontsize=16, y=1.00)
+
+        # Row 1: Sensor Count Impact (Accuracy x Convergence Time)
         for strategy in results_df['strategy'].unique():
             data = results_df[results_df['strategy'] == strategy]
             axes[0,0].plot(data['sensor_count'], data['final_accuracy'], 
@@ -622,7 +739,7 @@ class TensorBoardAnalyzer:
         axes[0,0].set_ylabel('Final Accuracy (%)')
         axes[0,0].grid(True, alpha=0.3)
         axes[0,0].legend()
-        
+
         for strategy in results_df['strategy'].unique():
             data = results_df[results_df['strategy'] == strategy]
             axes[0,1].plot(data['sensor_count'], data['convergence_time'], 
@@ -632,7 +749,7 @@ class TensorBoardAnalyzer:
         axes[0,1].set_ylabel('Convergence Time (min)')
         axes[0,1].grid(True, alpha=0.3)
         axes[0,1].legend()
-        
+
         # Row 2: Grid Size Impact
         for strategy in results_df['strategy'].unique():
             data = results_df[results_df['strategy'] == strategy]
@@ -643,17 +760,19 @@ class TensorBoardAnalyzer:
         axes[1,0].set_ylabel('Final Accuracy (%)')
         axes[1,0].grid(True, alpha=0.3)
         axes[1,0].legend()
-        
+
+        # Verifica se 'convergence_rate' existe antes de plotar
         for strategy in results_df['strategy'].unique():
             data = results_df[results_df['strategy'] == strategy]
-            axes[1,1].plot(data['grid_size'], data['convergence_rate'], 
-                        marker='o', label=strategy, linewidth=2)
-        axes[1,1].set_title('Convergence Rate by Grid Size')
+            if 'convergence_time' in data.columns:
+                axes[1,1].plot(data['grid_size'], data['convergence_time'],
+                               marker='o', label=strategy, linewidth=2)
+        axes[1,1].set_title('Convergence Time by Grid Size')
         axes[1,1].set_xlabel('Grid Size')
-        axes[1,1].set_ylabel('Convergence Rate')
+        axes[1,1].set_ylabel('Convergence Time')
         axes[1,1].grid(True, alpha=0.3)
         axes[1,1].legend()
-        
+
         # Row 3: Success Rate Impact
         for strategy in results_df['strategy'].unique():
             data = results_df[results_df['strategy'] == strategy]
@@ -664,7 +783,7 @@ class TensorBoardAnalyzer:
         axes[2,0].set_ylabel('Final Accuracy (%)')
         axes[2,0].grid(True, alpha=0.3)
         axes[2,0].legend()
-        
+
         for strategy in results_df['strategy'].unique():
             data = results_df[results_df['strategy'] == strategy]
             axes[2,1].plot(data['success_rate'], data['convergence_time'], 
@@ -674,15 +793,15 @@ class TensorBoardAnalyzer:
         axes[2,1].set_ylabel('Convergence Time (min)')
         axes[2,1].grid(True, alpha=0.3)
         axes[2,1].legend()
-        
+
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'dimension_impact.png'), dpi=300, bbox_inches='tight')
         plt.close()
-        
+
         # 2. Strategy Performance Heatmaps
-        metrics = ['final_accuracy', 'convergence_time', 'convergence_rate']
+        metrics = ['final_accuracy', 'convergence_time', 'avg_staleness']
         fig, axes = plt.subplots(len(metrics), 1, figsize=(15, 5*len(metrics)))
-        
+
         for idx, metric in enumerate(metrics):
             pivot_data = pd.pivot_table(
                 results_df,
@@ -691,26 +810,27 @@ class TensorBoardAnalyzer:
                 columns=['sensor_count', 'grid_size'],
                 aggfunc='mean'
             )
-            
             sns.heatmap(pivot_data, ax=axes[idx], cmap='YlOrRd', annot=True, fmt='.2f')
             axes[idx].set_title(f'{metric.replace("_", " ").title()} Heatmap')
-            
+
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'strategy_heatmaps.png'), dpi=300, bbox_inches='tight')
         plt.close()
-        
+
         # 3. Parallel Coordinates Plot
         plt.figure(figsize=(15, 8))
-        
-        # Normalize the data for parallel coordinates
+
+        # Normaliza dados numéricos
         normalized_df = results_df.copy()
         for column in ['grid_size', 'sensor_count', 'success_rate', 'final_accuracy', 'convergence_time']:
             if column in normalized_df.columns:
                 min_val = normalized_df[column].min()
                 max_val = normalized_df[column].max()
-                normalized_df[column] = (normalized_df[column] - min_val) / (max_val - min_val)
-        
-        # Create parallel coordinates plot
+                if max_val != min_val:
+                    normalized_df[column] = (normalized_df[column] - min_val) / (max_val - min_val)
+                else:
+                    normalized_df[column] = 0.0
+
         pd.plotting.parallel_coordinates(
             normalized_df,
             'strategy',
@@ -720,14 +840,204 @@ class TensorBoardAnalyzer:
         plt.title('Strategy Performance Across All Dimensions')
         plt.grid(True, alpha=0.3)
         plt.xticks(rotation=30)
-        
+
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'parallel_coordinates.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
-    def generate_dimensional_analysis(self, results_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate analysis of performance across all dimensions."""
+    def generate_quick_summary_html(self, results_df: pd.DataFrame, output_dir) -> str:
+        """
+        1) Calculates a 'Best Overall Strategy' by ranking each strategy within every 
+        (grid_size, success_rate, sensor_count) combo on three metrics:
+            - convergence_time (40% weight, ascending=True)
+            - final_accuracy (30% weight, ascending=False)
+            - total_updates (30% weight, ascending=True)
+        Then averaging the total rank score across all combos -> best overall.
         
+        2) Creates exactly 3 bar charts (one per dimension):
+        - Bar chart X-axis = dimension values, Y-axis = total_score (lower=better),
+            hue=strategy.  So you can see how each strategy performs for each 
+            grid_size, success_rate, or sensor count in a single figure.
+        
+        3) Embeds a minimal HTML snippet with a short summary and the 3 <img> tags.
+        """
+        # --- Basic checks ---
+        if results_df.empty:
+            return "<div><h2>Dimension Breakdown</h2><p>No data available.</p></div>"
+        needed_cols = {
+            "strategy","grid_size","success_rate","sensor_count",
+            "convergence_time","final_accuracy","total_updates"
+        }
+        if not needed_cols.issubset(results_df.columns):
+            missing = needed_cols - set(results_df.columns)
+            return f"<p>Missing columns: {missing}</p>"
+
+        # --- Metric config: 40% time, 30% accuracy, 30% updates ---
+        metric_config = {
+            "convergence_time": {"weight": 0.7, "ascending": True},
+            "final_accuracy":   {"weight": 0.2, "ascending": False},
+            "total_updates":    {"weight": 0.1, "ascending": True},
+        }
+
+        # ---------------------------------------------------------
+        # 1) Compute a "Best Overall Strategy" with multi-metric rank
+        # ---------------------------------------------------------
+        # Group by (grid_size, success_rate, sensor_count, strategy), 
+        # average the metrics (in case multiple runs exist):
+        grouped = results_df.groupby(
+            ["grid_size","success_rate","sensor_count","strategy"]
+        ).agg({
+            "convergence_time":"mean",
+            "final_accuracy":"mean",
+            "total_updates":"mean"
+        }).reset_index()
+
+        # For each dimension combo, rank strategies:
+        combos = grouped[["grid_size","success_rate","sensor_count"]].drop_duplicates()
+        combo_results = []
+        for _, c in combos.iterrows():
+            sub = grouped[
+                (grouped["grid_size"]==c["grid_size"]) &
+                (grouped["success_rate"]==c["success_rate"]) &
+                (grouped["sensor_count"]==c["sensor_count"])
+            ].copy()
+            if sub.empty:
+                continue
+            # rank each metric
+            for m, conf in metric_config.items():
+                sub[f"{m}_rank"] = sub[m].rank(method="average", ascending=conf["ascending"])
+            # total_score = sum of weighted ranks
+            sub["total_score"] = 0
+            for m, conf in metric_config.items():
+                sub["total_score"] += sub[f"{m}_rank"] * conf["weight"]
+            combo_results.append(sub)
+
+        if not combo_results:
+            return "<p>No valid dimension combos found.</p>"
+        ranked_all = pd.concat(combo_results, ignore_index=True)
+
+        # Average total_score per strategy => best overall
+        final_scores = (
+            ranked_all.groupby("strategy")["total_score"]
+            .mean()
+            .sort_values()
+            .reset_index()
+            .rename(columns={"total_score":"avg_rank_score"})
+        )
+        # The top row is best
+        best_overall = final_scores.iloc[0]
+        best_name = best_overall["strategy"]
+        best_score = best_overall["avg_rank_score"]
+
+        # We can build a short table
+        overall_table_html = final_scores.to_html(
+            index=False,
+            classes="dataframe",
+            float_format=lambda x: f"{x:.3f}"
+        )
+
+        # ---------------------------------------------------------
+        # 2) Build exactly 3 bar charts: grid_size, success_rate, sensor_count
+        # ---------------------------------------------------------
+        # For each dimension, we group by (dimension, strategy), average the metrics,
+        # compute total_score with the same approach, then plot them all in 1 figure.
+        dimension_info = [
+            ("grid_size","Grid Size"),
+            ("success_rate","Success Rate"),
+            ("sensor_count","# of Sensors"),
+        ]
+        img_tags = []
+        for dim_col, dim_label in dimension_info:
+            # Aggregate
+            agg_df = results_df.groupby([dim_col, "strategy"]).agg({
+                "convergence_time":"mean",
+                "final_accuracy":"mean",
+                "total_updates":"mean"
+            }).reset_index()
+
+            # Rank each row
+            all_dim_results = []
+            for val in sorted(agg_df[dim_col].unique()):
+                subd = agg_df[agg_df[dim_col] == val].copy()
+                if subd.empty:
+                    continue
+                for m, conf in metric_config.items():
+                    subd[f"{m}_rank"] = subd[m].rank(method="average", ascending=conf["ascending"])
+                subd["total_score"] = 0
+                for m, conf in metric_config.items():
+                    subd["total_score"] += subd[f"{m}_rank"] * conf["weight"]
+                subd["dim_value"] = val  # store for plotting
+                all_dim_results.append(subd)
+
+            if not all_dim_results:
+                continue
+            plot_df = pd.concat(all_dim_results, ignore_index=True)
+
+            # Single bar chart for the entire dimension:
+            # x-axis = dimension values, y-axis = total_score, hue=strategy
+            plt.figure(figsize=(7,5))
+            sns.barplot(
+                data=plot_df, 
+                x="dim_value", 
+                y="total_score", 
+                hue="strategy",
+                palette="Set2"
+            )
+            plt.title(f"{dim_label} Breakdown (Lower Score = Better)")
+            plt.xlabel(dim_label)
+            plt.ylabel("Total Score")
+            plt.tight_layout()
+
+            # Save
+            filename = f"dim_breakdown_{dim_col}.png"
+            plt.savefig(os.path.join(output_dir, filename), dpi=100)
+            plt.close()
+
+            # Add <img> tag
+            img_tags.append(f"""
+            <div class="metric-card" style="margin-top:20px;">
+                <h3>{dim_label} Breakdown</h3>
+                <img src="{filename}" alt="{dim_col} breakdown" style="max-width:600px;">
+            </div>
+            """)
+
+        # ---------------------------------------------------------
+        # 3) Build final HTML snippet
+        # ---------------------------------------------------------
+        html = f"""
+        <div class="section">
+        <h2>Multi-Criteria Ranking (Time=70%, Acc=20%, Updates=10%)</h2>
+        <p>We rank each strategy in every (grid_size, success_rate, sensor_count) scenario, 
+            then average those ranks to find an overall best. 
+            Lower <code>avg_rank_score</code> means better performance across these combos.</p>
+
+        <div class="metric-card">
+            <h3>🏆 Best Overall Strategy</h3>
+            <p>
+            <strong>{best_name}</strong> 
+            (avg_rank_score={best_score:.3f})
+            </p>
+            <p>All strategies sorted by final score:</p>
+            <div class="table-wrapper">{overall_table_html}</div>
+        </div>
+
+        <div class="metric-card">
+            <h3>Dimension Breakdown (3 Plots)</h3>
+            <p>For each dimension (Grid Size, Success Rate, # of Sensors), 
+            we collapse the other dims, average the metrics, and plot 
+            <strong>total_score</strong> (lower=better) across all strategies. 
+            This yields exactly 3 bar charts below.</p>
+        </div>
+
+        {''.join(img_tags)}
+        </div>
+        """
+        return html
+    def generate_dimensional_analysis(self, results_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Gera análise de como cada dimensão (sensor_count, grid_size, success_rate)
+        afeta, em média, a acurácia e tempo de convergência, por estratégia.
+        """
         dimensions = {
             'sensor_count': results_df['sensor_count'].unique(),
             'grid_size': results_df['grid_size'].unique(),
@@ -749,11 +1059,11 @@ class TensorBoardAnalyzer:
                         'strategy': strategy,
                         'avg_accuracy': strategy_data['final_accuracy'].mean(),
                         'avg_convergence_time': strategy_data['convergence_time'].mean(),
-                        'avg_convergence_rate': strategy_data['convergence_rate'].mean()
+                        # Poderíamos incluir mais métricas, ex. total_updates
                     })
         
         return pd.DataFrame(analysis)
-            
+
 def main():
     analyzer = TensorBoardAnalyzer('./runs')
     analyzer.process_logs()
