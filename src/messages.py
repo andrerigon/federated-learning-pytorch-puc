@@ -17,3 +17,4 @@ class SimpleMessage(TypedDict):
     success_rate: float
     global_model_version: int  # For messages from UAV to sensors
     local_model_version: int   # For messages from sensors to UAV
+    extra_info: dict

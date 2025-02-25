@@ -30,7 +30,7 @@ class SimpleSensorProtocol(IProtocol):
         self.logger = logger.bind(source="sensor", sensor_id=self.id)
 
         # Communication Mediator with configurable success rate
-        self.communicator = CommunicationMediator[SendMessageCommand](success_rate = self.success_rate)
+        self.communicator = CommunicationMediator[SendMessageCommand](origin = "sensor-{self.id}", success_rate = self.success_rate)
         self.logger.info("Started")
     
     def bla(self):
@@ -78,7 +78,8 @@ class SimpleSensorProtocol(IProtocol):
                     'training_cycles': self.federated_learning_trainer.training_cycles,
                     'model_updates': self.federated_learning_trainer.model_updates,
                     'success_rate': self.communicator.successful_attempts / self.communicator.total_attempts if self.communicator.total_attempts > 0 else 0,
-                    'local_model_version': self.federated_learning_trainer.last_version()  # Include version used for training
+                    'local_model_version': self.federated_learning_trainer.last_version(),  # Include version used for training
+                    'extra_info': self.federated_learning_trainer.extra_info()
                 }
                 command = SendMessageCommand(json.dumps(response), simple_message['sender'])
                 result = self.communicator.send_message(command, self.provider)

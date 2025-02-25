@@ -14,8 +14,9 @@ STRATEGIES=(
   "FedAvgStrategy"
   "AsyncFedAvgStrategy"
   "RELAYStrategy"
+  "FedProxStrategy"
 #   "SAFAStrategy"
-#   "AstraeaStrategy"
+  "AstraeaStrategy"
 )
 
 ######################################################
@@ -132,9 +133,29 @@ if [ ${#SUCCESS_RATES[@]} -eq 0 ]; then
 fi
 
 ######################################################
-# Handle Ctrl+C (SIGINT)
+# Handle Ctrl+C (SIGINT) with detailed confirmation
 ######################################################
-trap "echo -e '\nSimulation script interrupted by user.'; exit 1" SIGINT
+function handle_sigint() {
+    echo -e "\n"
+    echo "WARNING: Interrupting the simulation will:"
+    echo "- Stop all running strategies"
+    echo "- Potentially leave incomplete results"
+    echo "- Require restarting the current grid/sensor combination"
+    echo ""
+    read -r -p "Are you sure you want to stop the simulation? [y/N] " response
+    if [[ "$response" =~ ^([yY][eE][sS]|[yY])+$ ]]; then
+        echo "Simulation interrupted by user."
+        # Optionally, you could add cleanup code here
+        exit 1
+    else
+        echo "Continuing simulation..."
+        # Move to new line to avoid messing up output
+        echo ""
+    fi
+}
+
+# Set up the trap with the new handler function
+trap handle_sigint SIGINT
 
 ######################################################
 # Run simulations

@@ -1,6 +1,7 @@
 import json
 import logging
 import queue
+import traceback
 import threading
 from datetime import datetime
 from gradysim.protocol.interface import IProtocol
@@ -89,7 +90,7 @@ class SimpleUAVProtocol(IProtocol):
         self.logger = logger.bind(source="uav", uav_id=self.id)
         self.logger.info(f"Starting UAV")
 
-        self.communicator = CommunicationMediator[SendMessageCommand](success_rate = self.success_rate)
+        self.communicator = CommunicationMediator[SendMessageCommand](origin = "uav", success_rate = self.success_rate)
         mission_config = MissionMobilityConfiguration(loop_mission=LoopMission.RESTART)
         self._mission = MissionMobilityPlugin(self, mission_config)
         self._mission.start_mission(self.mission_list)
@@ -110,7 +111,7 @@ class SimpleUAVProtocol(IProtocol):
             'global_model_version': self.aggregator.global_model_version 
         }
         command = BroadcastMessageCommand(json.dumps(message))
-        self.provider.send_communication_command(command)
+        self.communicator.send_message(command, self.provider)
 
         response_message: SimpleMessage = {
                     'sender_type': SimpleSender.UAV.value,
@@ -121,8 +122,8 @@ class SimpleUAVProtocol(IProtocol):
                     'global_model_version': self.aggregator.global_model_version
                 }
         command = BroadcastMessageCommand(json.dumps(response_message))
-        self.provider.send_communication_command(command)
-        self.provider.schedule_timer("", self.provider.current_time() + 1)
+        self.communicator.send_message(command, self.provider)
+        self.provider.schedule_timer("", self.provider.current_time() + 10)
 
     def handle_timer(self, timer: str) -> None:
         map = self.aggregator.tracked_vars()
@@ -157,7 +158,7 @@ class SimpleUAVProtocol(IProtocol):
                 decompressed_state_dict = decompress_and_deserialize_state_dict(message['payload'])
 
                 # Pass to aggregator
-                self.aggregator.receive_model_update(sender_id, decompressed_state_dict, client_model_version)
+                self.aggregator.receive_model_update(sender_id, decompressed_state_dict, client_model_version, extra_info=message.get('extra_info', {}))
 
                 # Send global model back to that sender
                 response_message: SimpleMessage = {
@@ -190,6 +191,7 @@ class SimpleUAVProtocol(IProtocol):
             self.logger.error(f"KeyError: Missing key in message - {e}")
         except Exception as e:
             self.logger.error(f"Unexpected error: {e}", exc_info=True)
+            traceback.print_exc()
         # gc.collect()
 
     def handle_packet(self, message: str) -> None:
@@ -200,5 +202,4 @@ class SimpleUAVProtocol(IProtocol):
 
     def finish(self) -> None:
         # Signal aggregator to stop and finalize
-        self.aggregator.stop()
         self.logger.info(f"Finished.")

@@ -599,40 +599,16 @@ class TensorBoardAnalyzer:
 
     def get_colors(self, n: int):
         """
-        Returns a list of n visually distinct colors using a curated palette.
+        Returns a list of n colors from Seaborn's 'Set2' palette, 
+        converted to HEX strings.
         """
-        if n <= 0:
-            return []
+        # Generate n colors from the Set2 palette
+        palette = sns.color_palette("Set2", n_colors=n)
         
-        # Custom color palette inspired by Tableau and Material Design
-        custom_palette = [
-            '#1f77b4',  # Steel Blue
-            '#ff7f0e',  # Safety Orange
-            '#2ca02c',  # Cooked Asparagus Green
-            '#d62728',  # Brick Red
-            '#9467bd',  # Muted Purple
-            '#8c564b',  # Chestnut Brown
-            '#e377c2',  # Raspberry Yogurt Pink
-            '#7f7f7f',  # Middle Gray
-            '#bcbd22',  # Curry Yellow-Green
-            '#17becf',  # Blue-Teal
-            '#aec7e8',  # Soft Blue
-            '#ffbb78',  # Soft Orange
-            '#98df8a',  # Soft Green
-            '#ff9896',  # Soft Red
-            '#c5b0d5'   # Soft Purple
-        ]
+        # Convert each RGB tuple in 'palette' to a HEX string
+        hex_colors = [matplotlib.colors.to_hex(rgb) for rgb in palette]
         
-        if n <= len(custom_palette):
-            return custom_palette[:n]
-        
-        # If we need more colors, use a color map
-        import matplotlib.pyplot as plt
-        import numpy as np
-        
-        cmap = plt.get_cmap('viridis')
-        colors = [matplotlib.colors.to_hex(cmap(i)) for i in np.linspace(0, 1, n)]
-        return colors
+        return hex_colors
 
     def plot_comparisons(self, results_df: pd.DataFrame, output_dir: str):
         """
@@ -886,33 +862,51 @@ class TensorBoardAnalyzer:
         # ---------------------------------------------------------
         # 3. Parallel Coordinates Plot
         # ---------------------------------------------------------
-        plt.figure(figsize=(15, 8))
+        # Drop rows with missing numeric data
+        # Just be sure the columns exist:
+        numeric_cols = [
+            'grid_size', 
+            'sensor_count', 
+            'success_rate', 
+            'final_accuracy', 
+            'convergence_time'
+        ]
+        df_pair = results_df.copy()
+        # Filter only the columns we want + strategy
+        df_pair = df_pair.dropna(subset=numeric_cols)
+        if df_pair.empty:
+            print("No data available for pairplot. Skipping.")
+            return
 
-        # Normalize numeric columns for parallel coordinates
-        normalized_df = results_df.copy()
-        numeric_cols = ['grid_size', 'sensor_count', 'success_rate', 'final_accuracy', 'convergence_time']
-        for column in numeric_cols:
-            if column in normalized_df.columns:
-                min_val = normalized_df[column].min()
-                max_val = normalized_df[column].max()
-                if max_val != min_val:
-                    normalized_df[column] = (normalized_df[column] - min_val) / (max_val - min_val)
-                else:
-                    normalized_df[column] = 0.0
+        # Convert your strategy to a categorical (just in case)
+        # so Seaborn can color by it
+        df_pair['strategy'] = df_pair['strategy'].astype('category')
 
-        pd.plotting.parallel_coordinates(
-            normalized_df,
-            'strategy',
-            cols=numeric_cols,
-            color=colors
+        # Use Seaborn's pairplot
+        # hue='strategy' => each strategy gets its own color
+        # diag_kind='kde' => optional (KDE plots on the diagonal)
+        sns.set(style="white", font_scale=1.1)
+        g = sns.pairplot(
+            data=df_pair, 
+            vars=numeric_cols, 
+            hue='strategy', 
+            diag_kind='kde',       # or 'hist' if you prefer hist
+            corner=False,          # if True, only plot lower triangle
+            palette='Set2'
         )
-        plt.title('Strategy Performance Across All Dimensions')
-        plt.grid(True, alpha=0.3)
-        plt.xticks(rotation=30)
 
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'parallel_coordinates.png'), dpi=300, bbox_inches='tight')
+        # Tweak titles, etc.
+        g.fig.suptitle("Multi-dimensional View (Pair Plot)", y=1.02, fontsize=16)
+        # You can adjust legend
+        # g.add_legend()  # If needed
+
+        # Save to file
+        pairplot_path = os.path.join(output_dir, "parallel_coordinates.png") 
+        # ^ or name it "multidimensional_pairplot.png" 
+        g.savefig(pairplot_path, dpi=300, bbox_inches='tight')
         plt.close()
+
+        print("Saved pairplot (scatter matrix) as:", pairplot_path)
 
     def generate_quick_summary_html(self, results_df: pd.DataFrame, output_dir) -> str:
         """

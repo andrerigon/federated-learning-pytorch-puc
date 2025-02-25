@@ -31,7 +31,8 @@ class FederatedLearningTrainer:
         metrics_logger: MetricsLogger,
         device=None,
         start_thread=True,
-        synchronous=False
+        synchronous=False,
+        use_proximal_term=False
     ):
         """
         Initializes the FederatedLearningTrainer.
@@ -51,6 +52,7 @@ class FederatedLearningTrainer:
         self.local_model_version = 0
         self.synchronous = synchronous
         self.current_state = None
+        self.use_proximal_term = use_proximal_term
 
         # Load the dataset for the client
         self.dataset_loader = dataset_loader
@@ -235,6 +237,9 @@ class FederatedLearningTrainer:
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10)
         return criterion_reconstruction, criterion_classification, optimizer, scheduler
 
+    def extra_info(self):
+        return {'client_samples': len(self.loader)}
+  
     def train_one_batch(self, local_model, inputs, labels, criterion_reconstruction, criterion_classification, optimizer):
         """Train on a single batch with error handling."""
         try:
@@ -247,8 +252,15 @@ class FederatedLearningTrainer:
             reconstruction_loss = criterion_reconstruction(decoded, inputs)
             classification_loss = criterion_classification(classified, labels)
 
-            # Total loss
-            loss = reconstruction_loss + classification_loss
+            # Calculate proximal term if enabled
+            global_model_state_dict = self.global_model.state_dict()
+            proximal_term = self.calculate_proximal_term(
+                local_model, 
+                global_model_state_dict
+            ) if global_model_state_dict is not None else 0.0
+
+            # Total loss INCLUDING the proximal term
+            loss = reconstruction_loss + classification_loss + proximal_term
 
             # Backward pass and optimization
             loss.backward()
@@ -263,11 +275,57 @@ class FederatedLearningTrainer:
             classified = classified.detach()
 
             return loss, reconstruction_loss_value, classification_loss_value, decoded, classified
-        
+            
         except Exception as e:
             self.logger.error(f"Error in train_one_batch: {str(e)}", exc_info=True)
             raise  # Re-raise the exception after logging
 
+    def calculate_proximal_term(self, local_model, global_model_state_dict, mu=0.01):
+        """
+        Calculates the proximal term from FedProx (Li et al., 2020).
+        
+        The proximal term helps to keep local models from deviating too far from the global model
+        during training, which is particularly important in heterogeneous networks.
+        
+        Formula: (μ/2) * ||w - w_t||^2 
+        where:
+            μ: proximal term coefficient
+            w: local model parameters (weights and biases)
+            w_t: global model parameters at round t
+        
+        Args:
+            local_model (nn.Module): The current local model
+            global_model_state_dict (OrderedDict): State dict of global model parameters
+            mu (float): Proximal term coefficient (default: 0.01)
+            
+        Returns:
+            torch.Tensor: The calculated proximal term loss
+        """
+        if not hasattr(self, 'use_proximal_term') or not self.use_proximal_term:
+            return 0.0
+            
+        try:
+            proximal_term = 0.0
+            
+            # Work directly with model parameters
+            for name, local_param in local_model.named_parameters():
+                if name not in global_model_state_dict:
+                    continue
+                    
+                global_param = global_model_state_dict[name]
+                
+                if local_param.shape != global_param.shape:
+                    continue
+                    
+                param_diff = local_param - global_param
+                proximal_term += (mu / 2) * torch.norm(param_diff) ** 2
+                
+            return proximal_term
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating proximal term: {str(e)}", exc_info=True)
+            return 0.0  
+    
     def train_one_epoch(self, local_model, criterion_reconstruction, criterion_classification, optimizer, scheduler):
         running_reconstruction_loss = 0.0
         running_classification_loss = 0.0

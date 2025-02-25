@@ -28,7 +28,7 @@ from model_manager import ModelManager
 from image_classifier_autoencoders import  Autoencoder
 from federated_learning_trainer import FederatedLearningTrainer
 from federated_learning_aggregator import FederatedLearningAggregator
-from aggregation_strategy import FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy
+from aggregation_strategy import FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy, FedProxStrategy
 
 
 def custom_format(record):
@@ -218,7 +218,7 @@ def main():
     parser.add_argument(
         "--strategy",
         type=str,
-        choices=["FedAvgStrategy","AsyncFedAvgStrategy","RELAYStrategy","SAFAStrategy","AstraeaStrategy","TimeWeightedStrategy"],
+        choices=["FedAvgStrategy","AsyncFedAvgStrategy","RELAYStrategy","SAFAStrategy","AstraeaStrategy","TimeWeightedStrategy", "FedProxStrategy"],
         required=True,
         help="Name of the strategy to use (e.g., FedAvgStrategy, SAFAStrategy).",
     )
@@ -273,6 +273,7 @@ def main():
         "SAFAStrategy": SAFAStrategy(total_clients=args.num_sensors),
         "AstraeaStrategy": AstraeaStrategy(),
         "TimeWeightedStrategy": TimeWeightedStrategy(),
+        "FedProxStrategy": FedProxStrategy(max(1, args.num_sensors // 10))
     } 
 
     # Get the strategy
@@ -280,6 +281,9 @@ def main():
     
     # Check if training is synchronous
     is_synchronous = strategy_name == "FedAvgStrategy"
+
+    # calculate 
+    use_proximal_term = strategy_name == "FedProxStrategy"
 
     # Distribute sensors randomly in the area within x and y range (-200, 200)
     grid_size = args.grid_size
@@ -318,7 +322,8 @@ def main():
             model_manager,
             dataset_loader,
             metrics,
-            synchronous=is_synchronous
+            synchronous=is_synchronous,
+            use_proximal_term=use_proximal_term
         )
 
         trainers.append(federated_trainer)
@@ -392,6 +397,8 @@ def main():
     while simulation.step_simulation() and keep_going:
         if all(t.converged for t in aggregators):
             keep_going = False
+            for a in aggregators:
+                a.stop()
             for t in trainers: 
                 t.stop()
             simulation._finalize_simulation()

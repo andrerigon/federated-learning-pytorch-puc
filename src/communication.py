@@ -33,13 +33,14 @@ class CommunicationMediator(Generic[T]):
     Example:
         >>> mediator = CommunicationMediator[str](success_rate=0.8)
         >>> mediator.send_message("test_message", provider)
-    """
+    """ 
     
-    def __init__(self, success_rate: float) -> None:
+    def __init__(self, origin: str, success_rate: float) -> None:
         """
         Initialize the communication mediator.
         
         Args:
+            origin: the origin for debug purporses
             success_rate (float): Probability of successful message delivery (0.0 to 1.0)
             
         Raises:
@@ -51,6 +52,7 @@ class CommunicationMediator(Generic[T]):
         self.success_rate = success_rate
         self.total_attempts = 0
         self.successful_attempts = 0
+        self.origin = origin
 
     def send_message(self, command: T, provider: Any) -> bool:
         """
@@ -69,12 +71,14 @@ class CommunicationMediator(Generic[T]):
         self.total_attempts += 1
         
         # Simulate network conditions based on success rate
-        if random.random() < self.success_rate:
+        value = random.random()
+        if value < self.success_rate:
             self.successful_attempts += 1
             provider.send_communication_command(command)
+            logger.trace(f"[{self.origin}] Message succeded. Result: {value}, success_rate: {self.success_rate}")
             return True
         else:
-            logger.debug("Message failed to send due to simulated communication error.")
+            logger.trace(f"[{self.origin}] Message failed to send due to simulated communication error.  Result: {value}, success_rate: {self.success_rate}")
             return False
 
     def log_metrics(self) -> dict:

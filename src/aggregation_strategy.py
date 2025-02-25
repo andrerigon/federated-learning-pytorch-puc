@@ -38,6 +38,63 @@ class AggregationStrategy(ABC):
         """
         pass
 
+class FedProxStrategy(AggregationStrategy):
+    """
+    Implementation of FedProx aggregation strategy from:
+    'Federated Optimization in Heterogeneous Networks'
+    Li et al., MLSys 2020 (DOI: 10.48550/arXiv.1812.06127)
+    """
+    def __init__(self, K: int):
+        """
+        Args:
+            K: Number of devices to select per round (subset of total devices N)
+        """
+        super().__init__()
+        self.K = K  # Number of devices to aggregate per round
+        self.current_round_states = {}  # Store updates for current round
+        self.current_round_sizes = {}   # Store dataset sizes for current round
+
+    def aggregate(self, global_model: nn.Module, client_state_dict: OrderedDict, 
+                    alpha=0.1, extra_info=None) -> OrderedDict:
+            """
+            Implements FedProx aggregation following Algorithm 2.
+            """
+            if extra_info is None or 'client_id' not in extra_info:
+                return global_model.state_dict()
+                
+            client_id = extra_info['client_id']
+            dataset_size = extra_info.get('client_samples', 1)
+            
+            # Store this client's update and dataset size
+            self.current_round_states[client_id] = client_state_dict
+            self.current_round_sizes[client_id] = dataset_size
+            
+            # Only aggregate when we have received K updates
+            if len(self.current_round_states) < self.K:
+                return global_model.state_dict()
+                
+            # Initialize aggregation dict
+            global_dict = global_model.state_dict()
+            agg_dict = OrderedDict((k, torch.zeros_like(v)) for k, v in global_dict.items())
+            
+            total_samples = sum(self.current_round_sizes.values())
+            
+            # Weighted aggregation
+            for client_id, state_dict in self.current_round_states.items():
+                weight = self.current_round_sizes[client_id] / total_samples
+                for key in global_dict.keys():
+                    # Cast weight to the same dtype as the tensor
+                    weight_tensor = torch.tensor(weight, dtype=state_dict[key].dtype, device=state_dict[key].device)
+                    agg_dict[key] += state_dict[key] * weight_tensor
+                    
+            logger.info(f"Aggregated {len(self.current_round_states)} client updates")
+            
+            # Reset for next round
+            self.current_round_states = {}
+            self.current_round_sizes = {}
+            
+            return agg_dict
+    
 class AlphaWeightedStrategy(AggregationStrategy):
     """
     A simple incremental aggregation approach that linearly combines the global model
@@ -380,7 +437,7 @@ class AstraeaStrategy(AggregationStrategy):
     Astraea: Self-balancing federated learning with reputation scoring
     Reference: Astraea: Self-balancing federated learning for improving classification accuracy 
     of mobile deep learning applications
-    DOI: 10.1109/COMST.2020.3005238
+    DOI: 10.1109/ICCD46524.2019.00038
     
     Pseudocode:
     

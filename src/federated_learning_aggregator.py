@@ -169,7 +169,7 @@ class FederatedLearningAggregator:
         self.logger.info(f"received_client_ids with size {len(self.received_client_ids)} ")
         return len(self.received_client_ids) == self.client_count  
 
-    def receive_model_update(self, sender_id: str, client_dict: OrderedDict, local_model_version: int):
+    def receive_model_update(self, sender_id: str, client_dict: OrderedDict, local_model_version: int, extra_info: Dict = {}):
         """Called when a client model update arrives."""
         # Calculate staleness
         staleness = self.global_model_version - local_model_version
@@ -202,7 +202,7 @@ class FederatedLearningAggregator:
             updated_state = self.strategy.aggregate(
                 self.global_model,
                 client_dict,
-                extra_info={'staleness': staleness, 'client_id': sender_id}
+                extra_info = extra_info | {'staleness': staleness, 'client_id': sender_id}
             )
             self.update_global_model(updated_state)
             self.communication_stats['successful_updates'] += 1
