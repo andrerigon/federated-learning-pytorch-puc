@@ -17,19 +17,21 @@ import threading
 
 class MetricsLogger:
 
-    def __init__(self, client_id, output_dir='runs'):
+    def __init__(self, client_id, output_dir='runs', generate_visualizations=False):
         """
         Initialize the metrics logger.
 
         Args:
             client_id (int): The identifier for the client.
             output_dir (str, optional): Directory to save logs and outputs. Defaults to 'runs'.
+            generate_visualizations (bool, optional): Whether to generate visualizations and graphs. Defaults to False.
         """
         self.client_id = client_id
         self.output_dir = os.path.join(output_dir, f"client_{client_id}")
         os.makedirs(self.output_dir, exist_ok=True)
         self.writer = SummaryWriter(log_dir=self.output_dir)
         self._log = logging.getLogger(__name__)
+        self.generate_visualizations = generate_visualizations
 
         # Store raw data for delayed visualization
         self.raw_data = {
@@ -164,15 +166,17 @@ class MetricsLogger:
         self.writer.add_scalar('Performance/Training_Time', duration, step)
 
     def register_mse_per_sample(self, step, outputs, targets):
-        """Register MSE values per sample without storing history."""
+        """Register MSE values per sample."""
         try:
             mse = F.mse_loss(outputs, targets, reduction='none').mean(dim=[1,2,3])
             
-            # Only store the latest MSE values
-            self.raw_data['mse_values'] = [(step, mse.detach().cpu().numpy())]
-            
-            # Write scalar summary
+            # Always log the scalar summary
             self.writer.add_scalar('AI_Metrics/MSE_Mean', mse.mean().item(), step)
+            
+            # Only store raw data if visualizations are enabled
+            if self.generate_visualizations:
+                self.raw_data['mse_values'].append((step, mse.detach().cpu().numpy()))
+                
         except Exception as e:
             self._log.error(f"Error in register_mse_per_sample: {str(e)}", exc_info=True)
 
@@ -203,6 +207,10 @@ class MetricsLogger:
 
     def generate_visualizations(self):
         """Generate all visualizations in the main thread during flush."""
+        if not self.generate_visualizations:
+            self._log.info("Visualizations generation disabled - skipping")
+            return
+            
         try:
             if not threading.current_thread() is threading.main_thread():
                 self._log.warning("Attempting to generate visualizations outside main thread - deferring to flush()")
@@ -301,10 +309,14 @@ class MetricsLogger:
 
     def generate_plots(self):
         """Generate all visualization plots."""
+        if not self.generate_visualizations:
+            self._log.info("Plot generation disabled - skipping")
+            return
+            
         if not threading.current_thread() is threading.main_thread():
             self._log.warning("Skipping plot generation in non-main thread")
             return
-
+            
         try:
             output_dir = self.output_dir
             client_id = self.client_id
@@ -476,6 +488,10 @@ class MetricsLogger:
 
     def flush(self):
         """Write all metrics and generate all plots."""
+        if not self.generate_visualizations:
+            self._log.info("Visualizations generation disabled - skipping")
+            return  
+        
         print("\n\nWriting metrics to tensor\n\n")
         self.write_metrics_to_tensorboard()
         

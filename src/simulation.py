@@ -222,6 +222,8 @@ def main():
         required=True,
         help="Name of the strategy to use (e.g., FedAvgStrategy, SAFAStrategy).",
     )
+    parser.add_argument('--generate_visualizations', action='store_true', 
+                       help='Generate visualizations and graphs (disabled by default)')
 
     args = parser.parse_args()
 
@@ -315,7 +317,7 @@ def main():
     for pos in sensor_positions:
         output_dir = os.path.join(tensor_dir, f"client_{sensor_id}")
         os.makedirs(output_dir, exist_ok=True)
-        metrics = MetricsLogger(client_id=sensor_id, output_dir=output_dir)    
+        metrics = MetricsLogger(client_id=sensor_id, output_dir=output_dir, generate_visualizations=args.generate_visualizations)    
 
         federated_trainer = FederatedLearningTrainer(
             sensor_id,
@@ -345,7 +347,7 @@ def main():
     for i in range(args.num_uavs):
         uav_output_dir = os.path.join(tensor_dir, f"client_{sensor_id}")
         os.makedirs(uav_output_dir, exist_ok=True)
-        metrics = MetricsLogger(client_id=sensor_id, output_dir=uav_output_dir)    
+        metrics = MetricsLogger(client_id=sensor_id, output_dir=uav_output_dir, generate_visualizations=args.generate_visualizations)    
 
         aggregator = FederatedLearningAggregator(
             sensor_id,

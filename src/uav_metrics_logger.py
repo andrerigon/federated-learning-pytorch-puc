@@ -81,13 +81,15 @@ def plot_tsne(features, labels, output_dir):
     plt.close()
 
 class UAVMetricsLogger:
-    def __init__(self, id, output_dir):
+    def __init__(self, id, output_dir, generate_visualizations=False):
         self.id = id
         self.output_dir = output_dir
+        self.generate_visualizations = generate_visualizations
         self.training_cycles = {}
         self.model_updates = {}
         self.success_rates = {}
         self.staleness_records = []    # To record staleness metrics
+        os.makedirs(self.output_dir, exist_ok=True)
 
     def record_staleness(self, sender_id, staleness, timestamp):
         self.staleness_records.append({
@@ -124,13 +126,14 @@ class UAVMetricsLogger:
         staleness_df = pd.DataFrame(self.staleness_records)
         staleness_df.to_csv(os.path.join(self.output_dir, f'staleness_records_{self.id}.csv'), index=False)
 
-        plt.figure()
-        for sensor_id in staleness_df['sensor_id'].unique():
-            sensor_data = staleness_df[staleness_df['sensor_id'] == sensor_id]
-            plt.plot(sensor_data['timestamp'], sensor_data['staleness'], label=f"Sensor {sensor_id}")
-        plt.xlabel('Timestamp', fontsize=14)
-        plt.ylabel('Staleness', fontsize=14)
-        plt.title(f'Staleness Over Time for UAV {self.id}', fontsize=14)
-        plt.legend()
-        plt.savefig(os.path.join(self.output_dir, f'staleness_over_time_{self.id}.png'))
-        plt.close()                      
+        if self.generate_visualizations:
+            plt.figure()
+            for sensor_id in staleness_df['sensor_id'].unique():
+                sensor_data = staleness_df[staleness_df['sensor_id'] == sensor_id]
+                plt.plot(sensor_data['timestamp'], sensor_data['staleness'], label=f"Sensor {sensor_id}")
+            plt.xlabel('Timestamp', fontsize=14)
+            plt.ylabel('Staleness', fontsize=14)
+            plt.title(f'Staleness Over Time for UAV {self.id}', fontsize=14)
+            plt.legend()
+            plt.savefig(os.path.join(self.output_dir, f'staleness_over_time_{self.id}.png'))
+            plt.close()                      

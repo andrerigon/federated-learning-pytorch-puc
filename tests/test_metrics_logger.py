@@ -14,7 +14,11 @@ class TestMetricsLogger(unittest.TestCase):
         # Create a temporary directory for outputs
         self.test_dir = tempfile.mkdtemp()
         self.client_id = 1
-        self.metrics_logger = MetricsLogger(client_id=self.client_id, output_dir=self.test_dir)
+        self.metrics_logger = MetricsLogger(
+            client_id=self.client_id,
+            output_dir=self.test_dir,
+            generate_visualizations=True  # Enable for testing
+        )
         # Set logging level to capture warnings and errors
         logging.basicConfig(level=logging.DEBUG)
     
@@ -223,5 +227,32 @@ class TestMetricsLogger(unittest.TestCase):
             self.metrics_logger.register_staleness(update_number, value)
         self.assertIn((update_number, value, 1000), self.metrics_logger.metrics['staleness'])
     
+    def test_visualization_disabled(self):
+        """Test that visualizations aren't generated when disabled."""
+        # Create a new metrics logger with visualizations disabled
+        disabled_logger = MetricsLogger(
+            client_id=self.client_id + 1,
+            output_dir=self.test_dir,
+            generate_visualizations=False
+        )
+        
+        # Add sample data
+        disabled_logger.metrics['losses']['reconstruction'].append((1, 0.5))
+        disabled_logger.metrics['accuracy'].append((1, 0.8))
+        
+        # Run the method
+        with patch('threading.current_thread') as mock_current_thread:
+            mock_current_thread.return_value = threading.main_thread()
+            disabled_logger.generate_plots()
+        
+        # Check that no plot files were created
+        plot_files = [
+            'reconstruction_loss_plot.png',
+            'accuracy_plot.png'
+        ]
+        for filename in plot_files:
+            filepath = os.path.join(self.test_dir, f'client_{self.client_id + 1}', filename)
+            self.assertFalse(os.path.exists(filepath))
+
 if __name__ == '__main__':
     unittest.main()

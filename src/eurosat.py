@@ -18,6 +18,7 @@ from scipy.optimize import linear_sum_assignment
 import plotly.express as px
 import plotly.graph_objects as go
 import json
+import os
 
 import torch
 import torch.nn as nn
@@ -330,9 +331,18 @@ class TrainingLogger:
     """
     Handles training progress logging and visualization in TensorBoard.
     """
-    def __init__(self, log_dir):
-        self.writer = SummaryWriter(log_dir)
+    def __init__(self, log_dir, generate_visualizations=False):
+        """
+        Initializes a training logger.
+        
+        Args:
+            log_dir (str): Directory to save logs
+            generate_visualizations (bool): Whether to generate visualizations
+        """
+        os.makedirs(log_dir, exist_ok=True)
+        self.writer = SummaryWriter(log_dir=log_dir)
         self.step = 0
+        self.generate_visualizations = generate_visualizations
     
     def log_training_step(self, metrics, batch=None, reconstructed=None):
         """
@@ -375,9 +385,11 @@ class TrainingLogger:
         Logs evaluation metrics and creates visualizations.
         """
         for name, value in metrics.items():
+            # Always log scalar metrics
             if isinstance(value, (int, float)):
                 self.writer.add_scalar(f'{phase}/{name}', value, self.step)
-            elif name == 'confusion_matrix':
+            # Only create visualization figures if enabled
+            elif name == 'confusion_matrix' and self.generate_visualizations:
                 fig = plt.figure(figsize=(10, 8))
                 sns.heatmap(value, annot=True, fmt='d')
                 plt.title(f'{phase.capitalize()} Confusion Matrix')
