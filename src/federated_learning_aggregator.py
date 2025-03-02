@@ -451,7 +451,7 @@ class FederatedLearningAggregator:
                 }
             )
         except Exception as e:
-            self.logger.info.error(f"Error in save_final_metrics: {e}", exc_info=True)
+            self.logger.error(f"Error in save_final_metrics: {e}", exc_info=True)
 
     def stop(self):
         """Stop evaluation, cleanup resources, and finalize."""

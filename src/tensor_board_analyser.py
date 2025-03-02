@@ -10,6 +10,13 @@ import re
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+import glob
+import tensorflow as tf
+from loguru import logger
+import sys
+import json
+
+# Configure loguru
 
 class TensorBoardAnalyzer:
     def __init__(self, base_dir: str = '.'):
@@ -24,7 +31,7 @@ class TensorBoardAnalyzer:
         # self.hparams_data[scenario][strategy] = dict com { 'hparam/final_accuracy': valor, ... }
         self.hparams_data = defaultdict(lambda: defaultdict(dict))
 
-        print(f"Found scenarios: {self.scenarios}")
+        logger.info(f"Found scenarios: {self.scenarios}")
 
     def _get_scenarios(self) -> List[str]:
         return [
@@ -83,58 +90,119 @@ class TensorBoardAnalyzer:
 
     def process_logs(self):
         """
-        Varre todos os cenários e estratégias, lê os arquivos do TensorBoard,
-        e armazena tanto as séries de métricas (self.metrics_data) quanto os
-        hparams (self.hparams_data).
+        Process all runs by directly reading from the aggregator_metrics directories.
+        Aggregates runs for each strategy and scenario.
         """
-        print("Processing logs...")
+        logger.info("Starting to process logs...")
+        logger.info(f"Base directory: {self.base_dir}")
+        logger.info(f"Found {len(self.scenarios)} scenarios to analyze")
         
         for scenario in self.scenarios:
-            print(f"\nProcessing scenario: {scenario}")
-            _, sensor_count, _ = self._extract_scenario_params(scenario)
-
-            # Exemplo: .../runs_500x500_s10_sr0.9/tensorboard/aggregator_10
-            tb_path = os.path.join(scenario, 'tensorboard', f'aggregator_{sensor_count}')
-
-            if not os.path.exists(tb_path):
-                print(f"Path {tb_path} not found. Skipping.")
+            scenario_name = os.path.basename(scenario)
+            logger.info(f"Processing scenario: {scenario_name}")
+            
+            # Extract parameters from scenario name
+            grid_size, sensor_count, success_rate = self._extract_scenario_params(scenario)
+            logger.info(f"  Parameters: Grid={grid_size}x{grid_size}, Sensors={sensor_count}, Success Rate={success_rate}")
+            
+            # Path to aggregator_metrics directory
+            metrics_dir = os.path.join(scenario, 'aggregator_metrics')
+            
+            if not os.path.exists(metrics_dir):
+                logger.warning(f"No aggregator_metrics directory found at {metrics_dir}")
                 continue
-
-            try:
-                for strategy in os.listdir(tb_path):
-                    # Filtra pastas de estratégias
-                    if not strategy.endswith('Strategy'):
-                        continue
-
-                    strategy_path = os.path.join(tb_path, strategy)
-                    run_dirs = [
-                        d for d in os.listdir(strategy_path)
-                        if d.startswith('run_') and os.path.isdir(os.path.join(strategy_path, d))
-                    ]
-
-                    for run_dir in run_dirs:
-                        run_path = os.path.join(strategy_path, run_dir)
-                        event_files = []
-                        for root, _, files in os.walk(run_path):
-                            for f in files:
-                                if f.startswith('events.out.tfevents'):
-                                    event_files.append(os.path.join(root, f))
-
-                        for event_file in event_files:
-                            parsed_metrics = self._parse_event_file(event_file)
-
-                            # Armazena as séries (ex.: "Evaluation/accuracy")
-                            for tag, values in parsed_metrics.items():
-                                if tag == "hparams":
-                                    continue
-                                self.metrics_data[scenario][strategy][tag].extend(values)
-
-                            # Armazena hparams
-                            for hparam_key, hparam_val in parsed_metrics["hparams"].items():
-                                self.hparams_data[scenario][strategy][hparam_key] = hparam_val
-
-            except Exception as e:
-                print(f"Error processing {scenario}: {e}")
+            
+            # Get all strategy directories
+            strategy_dirs = [d for d in os.listdir(metrics_dir) 
+                            if os.path.isdir(os.path.join(metrics_dir, d))]
+            
+            logger.info(f"  Found {len(strategy_dirs)} strategies: {', '.join(strategy_dirs)}")
+            
+            for strategy in strategy_dirs:
+                strategy_dir = os.path.join(metrics_dir, strategy)
+                
+                # Get all run directories
+                run_dirs = [d for d in os.listdir(strategy_dir) 
+                           if os.path.isdir(os.path.join(strategy_dir, d)) and d.startswith('run_')]
+                
+                logger.info(f"  Strategy {strategy}: found {len(run_dirs)} runs")
+                
+                # Collect metrics from all runs for this strategy
+                all_run_metrics = []
+                
+                # Temporary storage for metrics across all runs
+                all_accuracies = []
+                all_losses = []
+                all_staleness = []
+                
+                for run_dir_name in run_dirs:
+                    run_dir = os.path.join(strategy_dir, run_dir_name)
+                    metrics_file = os.path.join(run_dir, 'final_metrics.json')
+                    
+                    if os.path.exists(metrics_file):
+                        try:
+                            with open(metrics_file, 'r') as f:
+                                metrics_json = json.load(f)
+                                
+                                # Extract metrics from the JSON structure
+                                run_metrics = {
+                                    'final_accuracy': metrics_json.get('performance', {}).get('final_accuracy'),
+                                    'convergence_time': metrics_json.get('convergence_time'),
+                                    'total_updates': metrics_json.get('total_updates'),
+                                    'communication_overhead': metrics_json.get('communication', {}).get('total_messages', 0),
+                                    'avg_staleness': metrics_json.get('staleness', {}).get('average', 0)
+                                }
+                                
+                                # Check if we have the required metrics
+                                if run_metrics['final_accuracy'] is not None:
+                                    # Add to all run metrics
+                                    all_run_metrics.append(run_metrics)
+                                    
+                                    # Collect metrics for aggregation
+                                    all_accuracies.append((0, run_metrics['final_accuracy']))
+                                    if 'performance' in metrics_json and 'final_loss' in metrics_json['performance']:
+                                        all_losses.append((0, metrics_json['performance']['final_loss']))
+                                    if run_metrics['avg_staleness'] is not None:
+                                        all_staleness.append((0, run_metrics['avg_staleness']))
+                                    
+                                    logger.debug(f"Collected metrics from {run_dir}: accuracy={run_metrics['final_accuracy']}")
+                                else:
+                                    logger.warning(f"Missing required metrics in {metrics_file}")
+                        except Exception as e:
+                            logger.error(f"Error processing {metrics_file}: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                
+                # Now aggregate and store metrics for this strategy
+                if all_run_metrics:
+                    # Calculate aggregated metrics
+                    agg_metrics = {
+                        'final_accuracy': np.mean([m['final_accuracy'] for m in all_run_metrics if m['final_accuracy'] is not None]),
+                        'convergence_time': np.mean([m['convergence_time'] for m in all_run_metrics if m['convergence_time'] is not None]),
+                        'total_updates': np.mean([m['total_updates'] for m in all_run_metrics if m['total_updates'] is not None]),
+                        'communication_overhead': np.mean([m['communication_overhead'] for m in all_run_metrics if m['communication_overhead'] is not None]),
+                        'avg_staleness': np.mean([m['avg_staleness'] for m in all_run_metrics if m['avg_staleness'] is not None])
+                    }
+                    
+                    # Store aggregated metrics in the metrics_data structure
+                    self.metrics_data[scenario][strategy]['Evaluation/accuracy'] = all_accuracies
+                    self.metrics_data[scenario][strategy]['Evaluation/loss'] = all_losses
+                    self.metrics_data[scenario][strategy]['Staleness/Value'] = all_staleness
+                    
+                    # Store aggregated metrics in the hparams_data structure
+                    self.hparams_data[scenario][strategy]['hparam/final_accuracy'] = agg_metrics['final_accuracy']
+                    self.hparams_data[scenario][strategy]['hparam/convergence_time'] = agg_metrics['convergence_time']
+                    self.hparams_data[scenario][strategy]['hparam/total_updates'] = agg_metrics['total_updates']
+                    self.hparams_data[scenario][strategy]['hparam/avg_staleness'] = agg_metrics['avg_staleness']
+                    self.hparams_data[scenario][strategy]['hparam/communication_overhead'] = agg_metrics['communication_overhead']
+                    
+                    logger.info(f"  Strategy {strategy}: aggregated metrics from {len(all_run_metrics)} runs")
+                    logger.info(f"  Strategy {strategy}: mean accuracy={agg_metrics['final_accuracy']:.2f}, " +
+                               f"mean convergence time={agg_metrics['convergence_time']:.2f}")
+                else:
+                    logger.warning(f"  Strategy {strategy}: no valid metrics found")
+        
+        return True
 
     def calculate_strategy_ranking(self, results_df: pd.DataFrame) -> pd.DataFrame:
         """Exemplo de ranking detalhado das estratégias (mantido do seu código original)."""
@@ -1126,6 +1194,333 @@ class TensorBoardAnalyzer:
                     })
         
         return pd.DataFrame(analysis)
+
+    def plot_comparisons_with_error_bars(self, results_df, output_dir):
+        """
+        Plot comparisons with error bars across multiple simulations.
+        
+        Args:
+            results_df (pd.DataFrame): DataFrame with aggregated results
+            output_dir (str): Directory to save output plots
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        try:
+            # Group by configuration parameters and strategy
+            grouped = results_df.groupby(['grid_size', 'sensor_count', 'success_rate', 'strategy'])
+            
+            # Calculate mean and std for each group
+            agg_results = grouped.agg({
+                'final_accuracy': ['mean', 'std'],
+                'convergence_time': ['mean', 'std'],
+                'communication_overhead': ['mean', 'std'],
+                'avg_staleness': ['mean', 'std']
+            }).reset_index()
+            
+            # Flatten multi-level columns
+            agg_results.columns = ['_'.join(col).strip('_') for col in agg_results.columns.values]
+            
+            # Plot grid size impact with error bars
+            metrics_list = ['final_accuracy_mean', 'convergence_time_mean']
+            fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+            
+            for grid_size in agg_results['grid_size'].unique():
+                for idx, metric_name in enumerate(metrics_list):
+                    std_name = metric_name.replace('mean', 'std')
+                    
+                    for strategy in agg_results['strategy'].unique():
+                        data = agg_results[(agg_results['grid_size'] == grid_size) & 
+                                  (agg_results['strategy'] == strategy)]
+                        
+                        if not data.empty:
+                            axes[idx].errorbar(
+                                data['sensor_count'], 
+                                data[metric_name],
+                                yerr=data[std_name],
+                                marker='o',
+                                label=f"{strategy} (Grid={grid_size}x{grid_size}, n={int(data['run_count'].iloc[0])})",
+                                linewidth=2,
+                                capsize=5
+                            )
+                            for x, y in zip(data['sensor_count'], data[metric_name]):
+                                if pd.notnull(y):
+                                    axes[idx].annotate(f'{y:.2f}', (x, y),
+                                                  textcoords="offset points",
+                                                  xytext=(0,10), ha='center')
+                
+                axes[idx].set_title(f'{metric_name.replace("_mean", "").replace("_", " ").title()} vs Sensor Count')
+                axes[idx].set_xlabel('Sensor Count')
+                axes[idx].grid(True, alpha=0.3)
+                axes[idx].legend(loc='best')
+            
+            plt.tight_layout()
+            sensor_plot = os.path.join(output_dir, 'sensor_impact.png')
+            plt.savefig(sensor_plot, dpi=300, bbox_inches='tight')
+            plt.close()
+            logger.info(f"Saved sensor impact plot to {sensor_plot}")
+        except Exception as e:
+            logger.exception(f"Error generating 'sensor_impact.png': {e}")
+        
+        # Update other plotting functions similarly...
+
+    def analyze(self, exclude_dirs=None):
+        """
+        Analyze TensorBoard logs and extract metrics.
+        
+        Args:
+            exclude_dirs (list, optional): List of directory names to exclude.
+            
+        Returns:
+            DataFrame: Pandas DataFrame containing extracted metrics.
+        """
+        logger.info(f"Starting analysis of TensorBoard logs in {self.base_dir}")
+        results = []
+        
+        # Process directories matching the pattern "runs_*"
+        config_dirs = glob.glob(os.path.join(self.base_dir, "runs_*"))
+        logger.info(f"Found {len(config_dirs)} configuration directories: {config_dirs}")
+        
+        # Keep track of runs per configuration
+        config_runs_count = defaultdict(int)
+        
+        for config_dir in config_dirs:
+            # Extract configuration parameters from directory name
+            config_name = os.path.basename(config_dir)
+            config_params = self._extract_config_params(config_name)
+            
+            logger.info(f"Processing configuration directory: {config_name}")
+            logger.info(f"Extracted parameters: {config_params}")
+            
+            # Find all tensorboard directories
+            tensorboard_dirs = glob.glob(os.path.join(config_dir, "**/tensorboard"), recursive=True)
+            logger.info(f"Found {len(tensorboard_dirs)} tensorboard directories")
+            
+            for tb_dir in tensorboard_dirs:
+                logger.info(f"Processing tensorboard directory: {tb_dir}")
+                
+                # Process all aggregator directories
+                aggregator_dirs = glob.glob(os.path.join(tb_dir, "aggregator_*"))
+                logger.info(f"Found {len(aggregator_dirs)} aggregator directories")
+                
+                for agg_dir in aggregator_dirs:
+                    logger.info(f"Processing aggregator directory: {agg_dir}")
+                    
+                    # Process all strategy directories
+                    strategy_dirs = [d for d in os.listdir(agg_dir) 
+                                     if os.path.isdir(os.path.join(agg_dir, d))]
+                    logger.info(f"Found {len(strategy_dirs)} strategy directories: {strategy_dirs}")
+                    
+                    for strategy in strategy_dirs:
+                        strategy_dir = os.path.join(agg_dir, strategy)
+                        logger.info(f"Processing strategy directory: {strategy}")
+                        
+                        # Process all run directories (with timestamps)
+                        run_dirs = [d for d in os.listdir(strategy_dir) 
+                                   if os.path.isdir(os.path.join(strategy_dir, d)) and d.startswith('run_')]
+                        logger.info(f"Found {len(run_dirs)} run directories: {run_dirs}")
+                        
+                        for run_dir in run_dirs:
+                            run_path = os.path.join(strategy_dir, run_dir)
+                            logger.info(f"Processing run directory: {run_dir}")
+                            
+                            # Extract metrics from this run
+                            metrics = self._extract_metrics(run_path)
+                            
+                            if metrics:
+                                # Add configuration parameters and strategy to metrics
+                                config_key = (
+                                    config_params['grid_size'], 
+                                    config_params['sensor_count'], 
+                                    config_params['success_rate'], 
+                                    strategy
+                                )
+                                config_runs_count[config_key] += 1
+                                
+                                metrics.update(config_params)
+                                metrics['strategy'] = strategy
+                                metrics['run_id'] = run_dir  # Keep track of run IDs
+                                logger.info(f"Extracted metrics: {metrics}")
+                                results.append(metrics)
+                            else:
+                                logger.warning(f"No metrics extracted from {run_path}")
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(results)
+        
+        if df.empty:
+            logger.warning("No valid metrics data found.")
+            return df
+        
+        logger.info(f"Raw results shape: {df.shape}")
+        logger.info(f"Raw results columns: {df.columns.tolist()}")
+        logger.info("Raw results sample:\n" + df.head().to_string())
+        
+        # Create a summary DataFrame of run counts
+        run_counts = df.groupby(['grid_size', 'sensor_count', 'success_rate', 'strategy']).size().reset_index(name='run_count')
+        
+        # Log run counts per configuration more prominently
+        logger.info("=============================================")
+        logger.info("SUMMARY OF RUNS PER SCENARIO")
+        logger.info("=============================================")
+        for _, row in run_counts.iterrows():
+            logger.info(f"Grid={row['grid_size']}x{row['grid_size']}, Sensors={row['sensor_count']}, SR={row['success_rate']}, Strategy={row['strategy']}: {row['run_count']} runs")
+        logger.info("=============================================")
+        
+        # Export run counts to CSV
+        run_counts.to_csv("tensorboard_analyzer_run_counts.csv", index=False)
+        logger.info("Saved run counts to tensorboard_analyzer_run_counts.csv")
+        
+        # Group by configuration parameters and strategy, then average
+        logger.info("Grouping by grid_size, sensor_count, success_rate, strategy and calculating means...")
+        grouped_df = df.groupby(['grid_size', 'sensor_count', 'success_rate', 'strategy']).agg({
+            'final_accuracy': 'mean',
+            'convergence_time': 'mean',
+            'communication_overhead': 'mean',
+            'avg_staleness': 'mean'
+        }).reset_index()
+        
+        logger.info("Grouped results (means) sample:\n" + grouped_df.head().to_string())
+        
+        # Also calculate standard deviation for error bars
+        logger.info("Calculating standard deviations...")
+        std_df = df.groupby(['grid_size', 'sensor_count', 'success_rate', 'strategy']).agg({
+            'final_accuracy': 'std',
+            'convergence_time': 'std',
+            'communication_overhead': 'std',
+            'avg_staleness': 'std'
+        }).reset_index()
+        
+        # Rename columns to indicate they are standard deviations
+        std_df.columns = [col if col in ['grid_size', 'sensor_count', 'success_rate', 'strategy'] 
+                          else f"{col}_std" for col in std_df.columns]
+        
+        # Merge means, standard deviations, and run counts
+        result_df = pd.merge(grouped_df, std_df, 
+                            on=['grid_size', 'sensor_count', 'success_rate', 'strategy'])
+        result_df = pd.merge(result_df, run_counts,
+                            on=['grid_size', 'sensor_count', 'success_rate', 'strategy'])
+        
+        logger.info("Final aggregated results with means, std devs, and run counts:\n" + result_df.head().to_string())
+        
+        # Save aggregated results
+        agg_csv_path = "tensorboard_analyzer_aggregated.csv"
+        result_df.to_csv(agg_csv_path, index=False)
+        logger.info(f"Saved aggregated results to {agg_csv_path}")
+        
+        return result_df
+    
+    def _extract_config_params(self, config_name):
+        """
+        Extract configuration parameters from directory name.
+        
+        Args:
+            config_name (str): Directory name (e.g., 'runs_200x200_s5_sr1.0')
+            
+        Returns:
+            dict: Dictionary of configuration parameters
+        """
+        params = {
+            'grid_size': None,
+            'sensor_count': None,
+            'success_rate': None
+        }
+        
+        # Extract grid size
+        grid_match = re.search(r'runs_(\d+)x\d+', config_name)
+        if grid_match:
+            params['grid_size'] = int(grid_match.group(1))
+        
+        # Extract sensor count
+        sensor_match = re.search(r'_s(\d+)', config_name)
+        if sensor_match:
+            params['sensor_count'] = int(sensor_match.group(1))
+        
+        # Extract success rate
+        sr_match = re.search(r'_sr([\d\.]+)', config_name)
+        if sr_match:
+            params['success_rate'] = float(sr_match.group(1))
+        
+        return params
+    
+    def _extract_metrics(self, run_dir):
+        """
+        Extract metrics from TensorBoard event files.
+        
+        Args:
+            run_dir (str): Directory containing TensorBoard event files
+            
+        Returns:
+            dict: Dictionary of metrics
+        """
+        metrics = {
+            'final_accuracy': None,
+            'convergence_time': None,
+            'communication_overhead': None,
+            'avg_staleness': None
+        }
+        
+        # Find TensorBoard event files
+        event_files = glob.glob(os.path.join(run_dir, 'events.out.tfevents.*'))
+        
+        if not event_files:
+            logger.warning(f"No event files found in {run_dir}")
+            return None
+        
+        logger.info(f"Found {len(event_files)} event files in {run_dir}")
+        
+        try:
+            # Lists to store accuracy values and timestamps
+            accuracies = []
+            timestamps = []
+            
+            # Process event files
+            for event_file in event_files:
+                logger.info(f"Processing event file: {event_file}")
+                event_count = 0
+                metric_count = 0
+                
+                for e in tf.compat.v1.train.summary_iterator(event_file):
+                    event_count += 1
+                    for v in e.summary.value:
+                        if 'Evaluation/accuracy' in v.tag:
+                            accuracies.append(tf.make_ndarray(v.tensor).item())
+                            timestamps.append(e.wall_time)
+                            metric_count += 1
+                        elif 'staleness' in v.tag.lower():
+                            metrics['avg_staleness'] = tf.make_ndarray(v.tensor).item()
+                            metric_count += 1
+                        elif 'communication' in v.tag.lower() and 'overhead' in v.tag.lower():
+                            metrics['communication_overhead'] = tf.make_ndarray(v.tensor).item()
+                            metric_count += 1
+                
+                logger.info(f"Processed {event_count} events, found {metric_count} relevant metrics")
+            
+            # Calculate metrics from collected values
+            if accuracies:
+                # Final accuracy is the last recorded accuracy
+                metrics['final_accuracy'] = accuracies[-1]
+                logger.info(f"Final accuracy: {metrics['final_accuracy']}")
+                
+                # If we have timestamps, calculate convergence time
+                if timestamps:
+                    # Time to reach target accuracy (e.g., 90% of max)
+                    max_accuracy = max(accuracies)
+                    target_accuracy = 0.9 * max_accuracy
+                    
+                    for i, acc in enumerate(accuracies):
+                        if acc >= target_accuracy:
+                            metrics['convergence_time'] = timestamps[i] - timestamps[0]
+                            logger.info(f"Convergence time: {metrics['convergence_time']} seconds")
+                            break
+            else:
+                logger.warning("No accuracy values found in event files")
+            
+            logger.info(f"Extracted metrics: {metrics}")
+            return metrics
+            
+        except Exception as e:
+            logger.exception(f"Error extracting metrics from {run_dir}: {e}")
+            return None
 
 def main():
     analyzer = TensorBoardAnalyzer('./runs')

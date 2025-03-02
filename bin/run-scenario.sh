@@ -13,10 +13,10 @@ DEFAULT_SUCCESS_RATES=("1.0")
 STRATEGIES=(
   "FedAvgStrategy"
   "AsyncFedAvgStrategy"
-  "RELAYStrategy"
-  "FedProxStrategy"
+  # "RELAYStrategy"
+  # "FedProxStrategy"
 #   "SAFAStrategy"
-  "AstraeaStrategy"
+  # "AstraeaStrategy"
 )
 
 ######################################################
@@ -160,6 +160,8 @@ trap handle_sigint SIGINT
 ######################################################
 # Run simulations
 ######################################################
+NUM_SIMULATIONS=5  # Number of simulations to run for each configuration
+
 for GRID_SIZE in "${GRIDS[@]}"; do
   for SR in "${SUCCESS_RATES[@]}"; do
     for SENSOR_COUNT in "${NUM_SENSORS[@]}"; do
@@ -169,7 +171,7 @@ for GRID_SIZE in "${GRIDS[@]}"; do
 
       for STRAT in "${STRATEGIES[@]}"; do
         echo "======================================"
-        echo "Running simulation with:"
+        echo "Running simulation batch with:"
         echo "  grid_size      = $GRID_SIZE"
         echo "  success_rate   = $SR"
         echo "  tensor_dir     = $TENSOR_DIR"
@@ -177,21 +179,31 @@ for GRID_SIZE in "${GRIDS[@]}"; do
         echo "  num_sensors    = $SENSOR_COUNT"
         echo "  target_accuracy= $TARGET_ACC"
         echo "  strategy       = $STRAT"
+        echo "  num_simulations= $NUM_SIMULATIONS"
         echo "======================================"
-
-        bin/simulation.sh \
-          --tensor_dir="$TENSOR_DIR" \
-          --grid_size="$GRID_SIZE" \
-          --num_uavs="$NUM_UAVS" \
-          --num_sensors="$SENSOR_COUNT" \
-          --target_accuracy="$TARGET_ACC" \
-          --success_rate="$SR" \
-          --strategy="$STRAT"
-
+        
+        # Run multiple simulations for this configuration
+        for SIM_NUM in $(seq 1 $NUM_SIMULATIONS); do
+          echo "Running simulation $SIM_NUM of $NUM_SIMULATIONS"
+          
+          # Just use the base directory - the timestamps in the run folders will differentiate the runs
+          bin/simulation.sh \
+            --tensor_dir="$TENSOR_DIR" \
+            --grid_size="$GRID_SIZE" \
+            --num_uavs="$NUM_UAVS" \
+            --num_sensors="$SENSOR_COUNT" \
+            --target_accuracy="$TARGET_ACC" \
+            --success_rate="$SR" \
+            --strategy="$STRAT" \
+          
+          echo "Completed simulation $SIM_NUM"
+        done
+        
+        echo "All simulations completed for this configuration"
         echo
       done
     done
   done
 done
 
-echo "All simulations completed!"
+echo "All simulation batches completed!"
