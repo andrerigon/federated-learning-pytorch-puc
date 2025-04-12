@@ -22,13 +22,16 @@ import subprocess
 from loguru import logger
 import sys
 from tqdm import tqdm
+import sys
+import time
+import subprocess
 
 from dataset_loader import DatasetLoader
 from model_manager import ModelManager
 from image_classifier_autoencoders import  Autoencoder
 from federated_learning_trainer import FederatedLearningTrainer
 from federated_learning_aggregator import FederatedLearningAggregator
-from aggregation_strategy import FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy, FedProxStrategy
+from aggregation_strategy import FedAdaptiveRL, QFedAvgStrategy, FedAdamStrategy,FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy, FedProxStrategy
 
 
 def custom_format(record):
@@ -212,13 +215,13 @@ def main():
     parser.add_argument('--num_uavs', type=int, default=1, help='Number of UAVs in the simulation')
     parser.add_argument('--num_sensors', type=int, default=4, help='Number of sensors to deploy')
     parser.add_argument('--target_accuracy', type=float, default=50, help='Target accuracy')
-    parser.add_argument('--transmision_range', type=float, default=5, help='Device transmission range')
+    parser.add_argument('--transmision_range', type=float, default=50, help='Device transmission range')
     parser.add_argument('--grid_size', type=float, default=200, help='Gride side size')
     parser.add_argument('--tensor_dir', type=str, default="runs", help='Tensor output dir')
     parser.add_argument(
         "--strategy",
         type=str,
-        choices=["FedAvgStrategy","AsyncFedAvgStrategy","RELAYStrategy","SAFAStrategy","AstraeaStrategy","TimeWeightedStrategy", "FedProxStrategy"],
+        choices=["FedAvgStrategy","AsyncFedAvgStrategy","RELAYStrategy","SAFAStrategy","AstraeaStrategy","TimeWeightedStrategy", "FedProxStrategy", "FedAdamStrategy", "QFedAvgStrategy", "FedAdaptiveRL"],
         required=True,
         help="Name of the strategy to use (e.g., FedAvgStrategy, SAFAStrategy).",
     )
@@ -228,6 +231,9 @@ def main():
     args = parser.parse_args()
 
     tensor_dir = args.tensor_dir
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
 
     # Remove default sink
     logger.remove()
@@ -241,7 +247,7 @@ def main():
     )
 
     logger.add(
-        f"{tensor_dir}/sensors.log",
+        f"{tensor_dir}/sensors_{timestamp}.log",
         level="INFO",
         format=(
         "<green>{time:HH:mm:ss}</green> "
@@ -252,7 +258,7 @@ def main():
     )
 
     logger.add(
-        f"{tensor_dir}/uavs.log",
+        f"{tensor_dir}/uavs.log_{timestamp}",
         level="INFO",
         format=(
         "<green>{time:HH:mm:ss}</green> "
@@ -264,6 +270,9 @@ def main():
 
     logger.info(f"Args: {args}")
 
+    # The pacings in the table for that plan were super weird: no truncated dates to hour, but full timestamps.
+    # Deleted them all and relaunched the plan.
+    # Also.
     # Parse the strategy name from command-line arguments
     strategy_name = args.strategy
 
@@ -275,7 +284,10 @@ def main():
         "SAFAStrategy": SAFAStrategy(total_clients=args.num_sensors),
         "AstraeaStrategy": AstraeaStrategy(),
         "TimeWeightedStrategy": TimeWeightedStrategy(),
-        "FedProxStrategy": FedProxStrategy(max(1, args.num_sensors // 10))
+        "FedProxStrategy": FedProxStrategy(3), #max(1, args.num_sensors // 10)),
+        "FedAdamStrategy": FedAdamStrategy(),
+        "QFedAvgStrategy": QFedAvgStrategy(),
+        "FedAdaptiveRL": FedAdaptiveRL()
     } 
 
     # Get the strategy
@@ -370,12 +382,12 @@ def main():
     builder.add_handler(TimerHandler())
     builder.add_handler(CommunicationHandler(CommunicationMedium(transmission_range=args.transmision_range)))
     builder.add_handler(MobilityHandler())
-    builder.add_handler(VisualizationHandler(VisualizationConfiguration(
-        x_range=x_range,
-        y_range=y_range,
-        z_range=(0, 200),
-        open_browser=False
-    )))
+    # builder.add_handler(VisualizationHandler(VisualizationConfiguration(
+    #     x_range=x_range,
+    #     y_range=y_range,
+    #     z_range=(0, 200),
+    #     open_browser=False
+    # )))
 
     simulation = builder.build()
 
@@ -423,7 +435,38 @@ def main():
     gc.collect()    
 
 if __name__ == "__main__":
+    max_attempts = 3
+    attempts = 0
+    exit_code = 1  # Default to error exit code
+    
+    while attempts < max_attempts:
+        attempts += 1
+        try:
+            print(f"Attempt {attempts} of {max_attempts}")
+            main()
+            # If we get here, main() succeeded
+            print(f"Main function completed successfully on attempt {attempts}")
+            exit_code = 0
+            break  # Exit the retry loop
+        except Exception as e:
+            print(f"Attempt {attempts} failed with error: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            if attempts < max_attempts:
+                # Optional: Add a delay before retrying
+                retry_delay = 2  # seconds
+                print(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                print(f"All {max_attempts} attempts failed")
+    
+    # This cleanup always runs
     try:
-        main()
-    finally:
+        print("Cleaning up resources...")
         subprocess.run("pkill -f torch_shm_manager", shell=True)
+    except Exception as cleanup_error:
+        print(f"Error during cleanup: {cleanup_error}")
+    
+    # Exit with appropriate code
+    sys.exit(exit_code)

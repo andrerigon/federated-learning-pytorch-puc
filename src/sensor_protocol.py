@@ -30,7 +30,7 @@ class SimpleSensorProtocol(IProtocol):
         self.logger = logger.bind(source="sensor", sensor_id=self.id)
 
         # Communication Mediator with configurable success rate
-        self.communicator = CommunicationMediator[SendMessageCommand](origin = "sensor-{self.id}", success_rate = self.success_rate)
+        self.communicator = CommunicationMediator[SendMessageCommand](origin = f"sensor-{self.id}", success_rate = self.success_rate)
         self.logger.info("Started")
     
     def bla(self):
@@ -49,7 +49,7 @@ class SimpleSensorProtocol(IProtocol):
                 new_version = simple_message.get('global_model_version', -1)
                 if new_version <= self.federated_learning_trainer.global_model_version:
                     # Discard the message
-                    self.logger.info(f"Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
+                    self.logger.trace(f"Discarding model update from UAV {simple_message['sender']} with version {new_version} as it's not newer.")
                     return  # Exit without processing
                 
                 # Else, process the model update
@@ -69,6 +69,7 @@ class SimpleSensorProtocol(IProtocol):
                     self.logger.debug("No local model is available")
                     return 
                 self.logger.info(f"Responding to ping from UAV {simple_message['sender']}")
+
                 response: SimpleMessage = {
                     'payload': serialize_state_dict(self.federated_learning_trainer.current_state),
                     'sender': self.id,
@@ -83,6 +84,8 @@ class SimpleSensorProtocol(IProtocol):
                 }
                 command = SendMessageCommand(json.dumps(response), simple_message['sender'])
                 result = self.communicator.send_message(command, self.provider)
+                # self.logger.info(f'Sending: result: {result}: message: {response.get('success_rate')} {self.communicator.successful_attempts} , total: {self.communicator.total_attempts} and rate: {self.communicator.successful_attempts / self.communicator.total_attempts if self.communicator.total_attempts > 0 else 0}')
+                # self.communicator.log_metrics()
                 if result:
                     self.packet_count += 1
                     self.federated_learning_trainer.model_updated = False

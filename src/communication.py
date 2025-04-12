@@ -75,10 +75,12 @@ class CommunicationMediator(Generic[T]):
         if value < self.success_rate:
             self.successful_attempts += 1
             provider.send_communication_command(command)
-            logger.trace(f"[{self.origin}] Message succeded. Result: {value}, success_rate: {self.success_rate}")
+            logger.trace("[{}] Message succeeded. Result: {}, success_rate: {}  self.total_attempts: {} self.successful_attempts: {}", 
+                self.origin, value, self.success_rate, self.total_attempts, self.successful_attempts)            
             return True
         else:
-            logger.trace(f"[{self.origin}] Message failed to send due to simulated communication error.  Result: {value}, success_rate: {self.success_rate}")
+            logger.trace("[{}] Message failed to send due to simulated communication error. Result: {}, success_rate: {}  total_attempts: {} successful_attempts: {}", 
+                self.origin, value, self.success_rate, self.total_attempts, self.successful_attempts)            
             return False
 
     def log_metrics(self) -> dict:

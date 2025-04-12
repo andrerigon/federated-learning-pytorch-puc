@@ -70,6 +70,7 @@ class FederatedLearningTrainer:
 
         self.finished = False
         self.model_updated = False
+        self.current_training_loss = 0
 
         self.logger = logger.bind(source="sensor", sensor_id=self.id)
 
@@ -238,7 +239,8 @@ class FederatedLearningTrainer:
         return criterion_reconstruction, criterion_classification, optimizer, scheduler
 
     def extra_info(self):
-        return {'client_samples': len(self.loader)}
+        return {'client_samples': len(self.loader),
+        'client_loss': self.current_training_loss}
   
     def train_one_batch(self, local_model, inputs, labels, criterion_reconstruction, criterion_classification, optimizer):
         """Train on a single batch with error handling."""
@@ -359,6 +361,7 @@ class FederatedLearningTrainer:
                     criterion_classification,
                     optimizer
                 )
+                self.current_training_loss = loss.item()
 
                 running_reconstruction_loss += reconstruction_loss_value
                 running_classification_loss += classification_loss_value

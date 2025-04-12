@@ -157,8 +157,13 @@ class SimpleUAVProtocol(IProtocol):
 
                 decompressed_state_dict = decompress_and_deserialize_state_dict(message['payload'])
 
+                extra_info = message.get('extra_info', {}) 
+                extra_info['success_rate'] = message.get('success_rate', 1.0)
+
+                print("Success rate: ", message.get('success_rate', 1.0))
+
                 # Pass to aggregator
-                self.aggregator.receive_model_update(sender_id, decompressed_state_dict, client_model_version, extra_info=message.get('extra_info', {}))
+                self.aggregator.receive_model_update(sender_id, decompressed_state_dict, client_model_version, extra_info=extra_info)
 
                 # Send global model back to that sender
                 response_message: SimpleMessage = {
