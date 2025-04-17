@@ -19,3 +19,8 @@ old_run
 runs_200x200
 runs_low_success_rate-10-01-25
 analysis_results
+runs_last
+runs_17_04/runs_1000x1000_s10_sr0.5
+simulation_output.log
+*.log
+runs_17_04
