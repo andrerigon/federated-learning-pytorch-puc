@@ -24,7 +24,9 @@ STRATEGIES=(
 
 # Output log file
 LOG_FILE="simulation_output.log"
-> "$LOG_FILE"  # Clear old log
+
+# Checkpoint file for resuming
+CHECKPOINT_FILE="simulation_checkpoint.txt"
 
 # Indexed arrays for stats (Bash 3.x compatible)
 STRAT_SUM_ARRAY=()
@@ -54,6 +56,7 @@ Options:
                               Default: ${DEFAULT_SUCCESS_RATES[*]}
   -i <int>                    Refresh interval (seconds)
                               Default: 1
+  -R                          Resume from last checkpoint
   -h                          Show this help and exit
 
 Examples:
@@ -61,11 +64,13 @@ Examples:
   $0 -h
   $0 -g 200,500 -s 5,10,20
   $0 -i 2
+  $0 -R                       Resume from last checkpoint
   $0 -g 200,500 -s 5,10,20 -t 75 -r 0.9,0.7 -i 1
 EOF
 }
 
 REFRESH_INTERVAL=1
+RESUME_MODE=false
 
 ######################################################
 # Parse arguments using getopts
@@ -76,7 +81,7 @@ NUM_SENSORS=()
 TARGET_ACC=""
 SUCCESS_RATES=()
 
-while getopts ":g:u:s:t:r:i:h" opt; do
+while getopts ":g:u:s:t:r:i:Rh" opt; do
   case ${opt} in
     g )
       IFS=',' read -ra parsed_grids <<< "$OPTARG"
@@ -98,6 +103,9 @@ while getopts ":g:u:s:t:r:i:h" opt; do
       ;;
     i )
       REFRESH_INTERVAL=$((OPTARG))
+      ;;
+    R )
+      RESUME_MODE=true
       ;;
     h )
       print_help
@@ -122,6 +130,22 @@ shift $((OPTIND - 1))
 [ ${#NUM_SENSORS[@]} -eq 0 ] && NUM_SENSORS=("${DEFAULT_NUM_SENSORS[@]}")
 [ -z "$TARGET_ACC" ] && TARGET_ACC="$DEFAULT_TARGET_ACC"
 [ ${#SUCCESS_RATES[@]} -eq 0 ] && SUCCESS_RATES=("${DEFAULT_SUCCESS_RATES[@]}")
+
+######################################################
+# Initialize log file
+######################################################
+if ! $RESUME_MODE; then
+  > "$LOG_FILE"  # Clear old log
+  > "$CHECKPOINT_FILE"  # Clear old checkpoint
+else
+  # Append to existing log in resume mode
+  echo "====================================" >> "$LOG_FILE"
+  echo "RESUMING SIMULATION FROM CHECKPOINT" >> "$LOG_FILE"
+  echo "====================================" >> "$LOG_FILE"
+  
+  # Make sure checkpoint file exists
+  touch "$CHECKPOINT_FILE"
+fi
 
 ######################################################
 # Color definitions
@@ -211,6 +235,9 @@ function show_resources() {
 function build_dashboard() {
   local dashboard=""
   dashboard+="${BOLD}=== SIMULATION BATCH RUNNER ===${RESET}\n"
+  if $RESUME_MODE; then
+    dashboard+="${BOLD}${GREEN}RESUME MODE: Skipping already completed simulations${RESET}\n"
+  fi
   dashboard+="Total simulations to run: ${CYAN}${TOTAL_SIMULATIONS}${RESET}\n"
   dashboard+="Overall progress: ${CYAN}${CURRENT_SIMULATION}${RESET} / ${CYAN}${TOTAL_SIMULATIONS}${RESET}\n\n"
   dashboard+="Current configuration:\n"
@@ -264,10 +291,11 @@ function handle_sigint() {
   echo -e "\n${BOLD}${RED}WARNING: Interrupting the simulation will:"
   echo -e "- Stop all running strategies"
   echo -e "- Potentially leave incomplete results"
-  echo -e "- Require restarting the current grid/sensor combination${RESET}\n"
+  echo -e "- The simulation can be resumed later with -R flag${RESET}\n"
   read -r -p "Are you sure you want to stop the simulation? [y/N] " response
   if [[ "$response" =~ ^([yY][eE][sS]|[yY])+$ ]]; then
       echo -e "${RED}Simulation interrupted by user.${RESET}"
+      echo -e "${GREEN}You can resume the simulation using: $0 -R${RESET}"
       kill $DISPLAY_PID 2>/dev/null
       rm -f /tmp/dashboard.txt
       tput cnorm
@@ -280,26 +308,63 @@ function handle_sigint() {
 trap handle_sigint SIGINT
 
 ######################################################
+# Checkpoint functions
+######################################################
+function is_completed() {
+  local grid="$1"
+  local sr="$2"
+  local sensors="$3"
+  local strategy="$4"
+  local sim_num="$5"
+  
+  # Check if this configuration has been completed
+  if grep -q "^${grid},${sr},${sensors},${strategy},${sim_num}$" "$CHECKPOINT_FILE"; then
+    return 0  # True, it's completed
+  else
+    return 1  # False, it's not completed
+  fi
+}
+
+function mark_completed() {
+  local grid="$1"
+  local sr="$2"
+  local sensors="$3"
+  local strategy="$4"
+  local sim_num="$5"
+  
+  # Mark this configuration as completed
+  echo "${grid},${sr},${sensors},${strategy},${sim_num}" >> "$CHECKPOINT_FILE"
+}
+
+######################################################
 # Count total simulations
 ######################################################
 TOTAL_SIMULATIONS=0
 NUM_SIMULATIONS=5  # per configuration
+SKIPPED_SIMULATIONS=0
 
 for GRID_SIZE in "${GRIDS[@]}"; do
   for SR in "${SUCCESS_RATES[@]}"; do
     for SENSOR_COUNT in "${NUM_SENSORS[@]}"; do
       for STRAT in "${STRATEGIES[@]}"; do
-        TOTAL_SIMULATIONS=$((TOTAL_SIMULATIONS + NUM_SIMULATIONS))
+        for SIM_NUM in $(seq 1 $NUM_SIMULATIONS); do
+          if $RESUME_MODE && is_completed "$GRID_SIZE" "$SR" "$SENSOR_COUNT" "$STRAT" "$SIM_NUM"; then
+            SKIPPED_SIMULATIONS=$((SKIPPED_SIMULATIONS + 1))
+          else
+            TOTAL_SIMULATIONS=$((TOTAL_SIMULATIONS + 1))
+          fi
+        done
       done
     done
   done
 done
 
+if $RESUME_MODE && [ $SKIPPED_SIMULATIONS -gt 0 ]; then
+  echo "Resume mode: Skipping $SKIPPED_SIMULATIONS already completed simulations" >> "$LOG_FILE"
+fi
+
 GLOBAL_START_TIME=$(date +%s)
 CURRENT_SIMULATION=0
-
-# Initialize simulation run number
-SIM_NUM=1
 
 # (Optional) Switch to the alternate screen and hide cursor.
 # If blinking still occurs, try commenting these lines out.
@@ -364,6 +429,14 @@ for GRID_SIZE in "${GRIDS[@]}"; do
         # Update current strategy before the inner simulation loop:
         STRAT="$STRAT"
         for SIM_NUM in $(seq 1 $NUM_SIMULATIONS); do
+          # Skip if this simulation was already completed (in resume mode)
+          if $RESUME_MODE && is_completed "$GRID_SIZE" "$SR" "$SENSOR_COUNT" "$STRAT" "$SIM_NUM"; then
+            {
+              echo "Skipping already completed simulation $SIM_NUM for strategy $STRAT (grid=${GRID_SIZE}, sensors=${SENSOR_COUNT}, sr=${SR})"
+            } >> "$LOG_FILE"
+            continue
+          fi
+          
           # Update dashboard variables:
           CURRENT_SIMULATION=$((CURRENT_SIMULATION + 1))
           # (GRID_SIZE, SENSOR_COUNT, STRAT, SIM_NUM are now current configuration)
@@ -381,7 +454,20 @@ for GRID_SIZE in "${GRIDS[@]}"; do
               --target_accuracy="$TARGET_ACC" \
               --success_rate="$SR" \
               --strategy="$STRAT"
-            echo "Completed simulation $SIM_NUM for strategy $STRAT"
+            SIMULATION_STATUS=$?
+            if [ $SIMULATION_STATUS -eq 0 ]; then
+              echo "Completed simulation $SIM_NUM for strategy $STRAT successfully"
+              # Mark this simulation as completed
+              mark_completed "$GRID_SIZE" "$SR" "$SENSOR_COUNT" "$STRAT" "$SIM_NUM"
+            else
+              echo "ERROR: Simulation $SIM_NUM for strategy $STRAT failed with status $SIMULATION_STATUS"
+              echo "You can resume from this point later using: $0 -R"
+              kill $DISPLAY_PID 2>/dev/null
+              rm -f /tmp/dashboard.txt
+              tput cnorm
+              tput rmcup
+              exit 1
+            fi
           } >> "$LOG_FILE" 2>&1
           
           END_TIME=$(date +%s)
