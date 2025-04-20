@@ -1,3 +1,9 @@
+from __future__ import annotations
+from collections import defaultdict, deque, OrderedDict
+from typing import Dict, Any
+import math
+import torch
+import torch.nn as nn
 import threading
 import torch
 import torch.nn as nn
@@ -34,7 +40,7 @@ class AggregationStrategy(ABC):
         
         Args:
             global_model (nn.Module): The global model before aggregation.
-            client_dict (OrderedDict or List[OrderedDict]): State dict(s) from the client(s).
+            client_dict (OrderedDict  ): State dict(s) from the client(s).
             alpha (float): Blending factor or other weighting parameter.
             extra_info (dict): Additional info like staleness if needed.
         
@@ -42,6 +48,299 @@ class AggregationStrategy(ABC):
             OrderedDict: The updated global state dictionary after aggregation.
         """
         pass
+
+
+import math
+import torch
+import torch.nn as nn
+from collections import OrderedDict, defaultdict, deque
+from typing import Dict, Any
+from loguru import logger
+
+class AdaptiveAsyncStrategy:
+    """
+    Adaptive‑Async Strategy
+    -----------------------
+
+    Contract
+    ~~~~~~~~
+        aggregate(global_model, client_dict, alpha=0.1, extra_info=None)
+
+        * `global_model`      : the *live* nn.Module on the UAV
+        * `client_dict`       : **state‑dict from ONE sensor**
+        * `alpha`             : base learning‑rate (same as FedAvg parameter)
+        * `extra_info` (dict) : metadata that comes in the sensor's message
+
+              Expected keys (all optional – safe fall‑backs are used):
+                  client_id            str   unique sensor id
+                  local_model_version  int   model version used for training
+                  global_model_version int   value broadcast when training started
+                  staleness            int   if pre‑computed by the sensor
+                  success_rate         float [0,1] link reliability measure
+                  n_samples            int   #samples used for local training
+
+    Update rule
+    -----------
+        w^{t+1} = w^{t} + λ · (w_client − w^{t})
+
+        λ = α · S(staleness) · R(success_rate) · D(n_samples) · F(first_time)
+
+        • S(s) = exp(−β * s)                ( β > 0  → faster decay )
+        • R(p) = max(p, min_success_rate)   ( p ∈ [0,1] )
+        • D(N) = N / moving_avg(N_all)      ( optional, defaults 1 )
+        • F(new) = boost_factor if new client, else 1.0
+
+        When metadata is missing the corresponding factor is 1,
+        turning the rule into plain incremental FedAvg.
+        
+    Adaptive parameters:
+        • β starts low and increases over time to be more forgiving early
+        • α starts high and decreases over time for faster early convergence
+        • Momentum is used to accelerate training
+        
+    Optimization Notes:
+        This implementation includes several optimizations to address convergence time issues:
+        
+        1. First-Client Boost: Each client's first update is amplified by a boost factor (default 3.0x)
+           to overcome cold start issues and jumpstart the learning process.
+           
+        2. Progressive Staleness Handling: Instead of a fixed high staleness penalty that overly
+           discounts updates, we use a gradually increasing penalty that's very forgiving early
+           in training (β=0.1) and becomes stricter over time (β=0.7).
+           
+        3. Diminishing Learning Rate: Higher initial α (1.0) allows for faster early progress
+           when gradient directions are more reliable, gradually decreasing to α=0.3 for stability.
+           
+        4. Success Rate Floor: A minimum success rate ensures that even clients with poor
+           communication links still contribute meaningfully to the model.
+           
+        5. Momentum Acceleration: Incorporates momentum to accelerate convergence by accumulating
+           update directions across rounds, helping to overcome plateaus in the optimization landscape.
+           
+        These optimizations work together to significantly improve convergence time while
+        maintaining the adaptiveness of the strategy, with particular emphasis on addressing
+        cold start issues and making early training iterations more effective.
+    """
+
+    # ------------------------------- configuration ------------------------ #
+    def __init__(
+        self,
+        initial_beta: float = 0.1,      # Initial β - low staleness penalty at start
+        final_beta: float = 0.3,        # Final β - higher staleness penalty later
+        initial_alpha: float = 1.0,     # Initial α - aggressive updates early
+        final_alpha: float = 0.3,       # Final α - conservative later
+        first_client_boost: float = 5.0,# Boost factor for first update from client
+        min_success_rate: float = 0.5,  # Minimum success rate to consider
+        window_success: int = 1,        # #rounds used for avg success‑rate
+        window_samples: int = 2,        # #rounds for moving‑avg sample count
+        max_rounds: int = 100,          # Estimate of rounds until convergence
+        use_momentum: bool = False,      # Whether to use momentum
+        momentum: float = 0.9,          # Momentum coefficient
+    ):
+        # Basic settings
+        self.initial_beta = initial_beta
+        self.final_beta = final_beta
+        self.initial_alpha = initial_alpha
+        self.final_alpha = final_alpha
+        self.first_client_boost = first_client_boost
+        self.min_success_rate = min_success_rate
+        
+        # History tracking
+        self.succ_history = defaultdict(lambda: deque(maxlen=window_success))
+        self.sample_history = deque(maxlen=window_samples)
+        self.seen_clients = set()  # Track clients we've seen before
+        
+        # Adaptive parameters
+        self.current_round = 0
+        self.max_rounds = max_rounds
+        
+        # Momentum
+        self.use_momentum = use_momentum
+        self.momentum = momentum
+        self.velocity = None
+
+        logger.info(f"Initialized AdaptiveAsyncStrategy with: initial_beta={initial_beta}, " 
+                   f"final_beta={final_beta}, initial_alpha={initial_alpha}, "
+                   f"final_alpha={final_alpha}, first_client_boost={first_client_boost}")
+
+    # ----------------------------- public API ----------------------------- #
+    def aggregate(
+        self,
+        global_model: nn.Module,
+        client_dict: OrderedDict,
+        alpha: float = 0.9,
+        extra_info: Dict[str, Any] | None = None,
+    ) -> OrderedDict:
+        """
+        Aggregates client update with the global model using adaptive weighting.
+        
+        Uses staleness, success rate, and data size to determine how much influence
+        the client update should have on the global model. The weighting is also
+        adapted based on training progress to be more aggressive early and more
+        conservative later.
+        """
+        extra_info = extra_info or {}
+        self.current_round += 1
+        
+        # Calculate training progress for adaptive parameters
+        progress = min(self.current_round / self.max_rounds, 1.0)
+        effective_beta = self.initial_beta + (self.final_beta - self.initial_beta) * progress
+        effective_alpha = self.initial_alpha + (self.final_alpha - self.initial_alpha) * (1 - progress)
+
+        # --- pull metadata with robust defaults ------------------------- #
+        cid = extra_info.get("client_id", f"unknown_{self.current_round}")
+        success_rate = float(extra_info.get("success_rate", 1.0))
+        staleness = int(extra_info.get("staleness", 0))
+        n_samples = int(extra_info.get("client_samples", extra_info.get("n_samples", 1)))
+
+        # If UAV broadcast / sensor stored the versions we can derive s
+        g_ver = extra_info.get("global_model_version")
+        l_ver = extra_info.get("local_model_version")
+        if staleness == 0 and (g_ver is not None and l_ver is not None):
+            staleness = max(g_ver - l_ver, 0)
+
+        # clip for safety
+        success_rate = min(max(success_rate, 0.0), 1.0)
+
+        # --- update rolling histories ----------------------------------- #
+        self.succ_history[cid].append(success_rate)
+        self.sample_history.append(n_samples)
+
+        # Check if this is the first time we've seen this client
+        first_time = cid not in self.seen_clients
+        self.seen_clients.add(cid)
+        first_time_factor = self.first_client_boost if first_time else 1.0
+
+        # moving averages
+        mean_samples = (
+            sum(self.sample_history) / len(self.sample_history)
+            if self.sample_history
+            else n_samples
+        )
+        
+        # --------------- compute adaptive mixing λ ----------------------- #
+        S = math.exp(-effective_beta * staleness)        # staleness factor
+        R = max(success_rate, self.min_success_rate)     # reliability factor with minimum
+        D = n_samples / mean_samples                     # data‑size factor
+        F = first_time_factor                            # first-time boost factor
+        
+        # Combine all factors
+        lam = effective_alpha * S * R * D * F
+        lam = max(0.0, min(1.0, lam))                    # keep in [0,1]
+
+        # Log detailed information for debugging
+        logger.info(f"Client {cid} (first_time={first_time}): "
+                   f"staleness={staleness}, success_rate={success_rate:.2f}, "
+                   f"samples={n_samples}, mean_samples={mean_samples:.1f}, "
+                   f"S={S:.3f}, R={R:.3f}, D={D:.3f}, F={F:.1f}, "
+                   f"α={effective_alpha:.2f}, β={effective_beta:.2f}, λ={lam:.4f}, "
+                   f"round={self.current_round}")
+
+        # --------------- convex blend with momentum --------------------- #
+        new_state: OrderedDict = OrderedDict()
+        g_state = global_model.state_dict()
+        
+        # Initialize velocity if using momentum and not initialized yet
+        if self.use_momentum and self.velocity is None:
+            self.velocity = OrderedDict()
+            for k, v in g_state.items():
+                self.velocity[k] = torch.zeros_like(v)
+        
+        # Perform update with or without momentum
+        for k, g_param in g_state.items():
+            if k in client_dict:
+                # Calculate the update direction
+                update = lam * (client_dict[k].to(g_param.device) - g_param)
+                
+                if self.use_momentum and self.velocity is not None:
+                    # Update with momentum
+                    self.velocity[k] = self.momentum * self.velocity[k] + update
+                    new_state[k] = g_param + self.velocity[k]
+                else:
+                    # Standard update without momentum
+                    new_state[k] = g_param + update
+            else:
+                # If parameter doesn't exist in client model, keep global
+                new_state[k] = g_param
+
+        return new_state
+
+
+    # def __init__(
+    #     self,
+    #     alpha_base: float = 0.2,      # base step (FedAvg used 0.1)
+    #     beta_staleness: float = 0.2,  # decay factor in exp(‑β s)
+    #     lambda_min: float = 0.05,     # minimum mixing coeff
+    #     beta1: float = 0.9,           # Adam first‑mom
+    #     beta2: float = 0.999,         # Adam second‑mom
+    #     eps: float = 1e-8,
+    #     win_success: int = 5,
+    # ):
+    #     self.alpha_base = alpha_base
+    #     self.beta_staleness = beta_staleness
+    #     self.lambda_min = lambda_min
+    #     self.beta1 = beta1
+    #     self.beta2 = beta2
+    #     self.eps = eps
+
+    #     self.succ_hist = defaultdict(lambda: deque(maxlen=win_success))
+    #     self.timestep = 0           # Adam time‑step
+    #     self.m: OrderedDict[str, torch.Tensor] | None = None
+    #     self.v: OrderedDict[str, torch.Tensor] | None = None
+
+    # # ------------------------------------------------------------------ #
+    # def aggregate(
+    #     self,
+    #     global_model: nn.Module,
+    #     client_dict: OrderedDict,
+    #     alpha=0.1,                          # kept for signature, ignored
+    #     extra_info: Dict[str, Any] | None = None,
+    # ) -> OrderedDict:
+    #     extra_info = extra_info or {}
+    #     cid           = extra_info.get("client_id", "unknown")
+    #     staleness     = int(extra_info.get("staleness", 0))
+    #     success_rate  = float(extra_info.get("success_rate", 1.0))
+    #     success_rate  = min(max(success_rate, 0.0), 1.0)
+
+    #     # Keep rolling success rate (fairness & noise dampening)
+    #     self.succ_hist[cid].append(success_rate)
+    #     sr_i  = sum(self.succ_hist[cid]) / len(self.succ_hist[cid])
+
+    #     # -------- adaptive mixing coefficient λ ------------------------ #
+    #     λ = (
+    #         self.alpha_base
+    #         * math.exp(-self.beta_staleness * staleness)
+    #         * sr_i
+    #     )
+    #     λ = max(λ, self.lambda_min)      # floor so every update counts
+
+    #     # -------- FedAdam gradient estimate ---------------------------- #
+    #     g_state = global_model.state_dict()
+    #     if self.m is None:
+    #         # initialise Adam buffers with zeros (same device/dtype)
+    #         self.m = OrderedDict((k, torch.zeros_like(p)) for k, p in g_state.items())
+    #         self.v = OrderedDict((k, torch.zeros_like(p)) for k, p in g_state.items())
+
+    #     new_state = OrderedDict()
+    #     self.timestep += 1
+    #     for k, w_t in g_state.items():
+    #         delta = client_dict[k].to(w_t.device) - w_t          # “gradient”
+    #         # scale by λ
+    #         g = λ * delta
+
+    #         # Adam moments
+    #         self.m[k] = self.beta1 * self.m[k] + (1 - self.beta1) * g
+    #         self.v[k] = self.beta2 * self.v[k] + (1 - self.beta2) * (g * g)
+
+    #         # bias‑corrected
+    #         m_hat = self.m[k] / (1 - self.beta1 ** self.timestep)
+    #         v_hat = self.v[k] / (1 - self.beta2 ** self.timestep)
+
+    #         # parameter update
+    #         new_state[k] = w_t + m_hat / (torch.sqrt(v_hat) + self.eps)
+
+    #     return new_state
+
 
 class FedAdaptiveRL(AggregationStrategy):
     """

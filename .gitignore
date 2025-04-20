@@ -24,3 +24,6 @@ runs_17_04/runs_1000x1000_s10_sr0.5
 simulation_output.log
 *.log
 runs_17_04
+runs_20_04
+venv_backup
+simulation_checkpoint.txt

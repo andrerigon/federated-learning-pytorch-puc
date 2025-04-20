@@ -82,6 +82,7 @@ class FederatedLearningAggregator:
         self.client_count = client_count
         self.client_versions = {}
         self.tracked_variables = {}
+        self.convergence_time = None
 
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -363,6 +364,7 @@ class FederatedLearningAggregator:
         self.logger.info("Global model converged.")
         step = len(self.metrics_history)
         self.converged = True
+        self.convergence_time = time.time()
         self.tb_writer.add_text('Convergence', f'Model converged at step {step}', step)
 
     def save_final_metrics(self):
@@ -380,7 +382,7 @@ class FederatedLearningAggregator:
             metrics_summary = {
                 'strategy': self.strategy_name,
                 'run_timestamp': self.run_timestamp,
-                'convergence_time': time.time() - self.start_time if self.converged else None,
+                'convergence_time': self.convergence_time - self.start_time if self.converged else None,
                 'total_updates': self.model_updates,
                 'performance': {
                     'final_accuracy': self.metrics_history[-1]['accuracy'] if self.metrics_history else None,

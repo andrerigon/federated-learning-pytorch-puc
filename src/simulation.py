@@ -31,8 +31,7 @@ from model_manager import ModelManager
 from image_classifier_autoencoders import  Autoencoder
 from federated_learning_trainer import FederatedLearningTrainer
 from federated_learning_aggregator import FederatedLearningAggregator
-from aggregation_strategy import FedAdaptiveRL, QFedAvgStrategy, FedAdamStrategy,FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy, FedProxStrategy
-
+from aggregation_strategy import AdaptiveAsyncStrategy, FedAdaptiveRL, QFedAvgStrategy, FedAdamStrategy,FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy, FedProxStrategy
 
 def custom_format(record):
     """
@@ -221,7 +220,7 @@ def main():
     parser.add_argument(
         "--strategy",
         type=str,
-        choices=["FedAvgStrategy","AsyncFedAvgStrategy","RELAYStrategy","SAFAStrategy","AstraeaStrategy","TimeWeightedStrategy", "FedProxStrategy", "FedAdamStrategy", "QFedAvgStrategy", "FedAdaptiveRL"],
+        choices=["AdaptiveAsyncStrategy", "FedAvgStrategy","AsyncFedAvgStrategy","RELAYStrategy","SAFAStrategy","AstraeaStrategy","TimeWeightedStrategy", "FedProxStrategy", "FedAdamStrategy", "QFedAvgStrategy", "FedAdaptiveRL"],
         required=True,
         help="Name of the strategy to use (e.g., FedAvgStrategy, SAFAStrategy).",
     )
@@ -284,10 +283,11 @@ def main():
         "SAFAStrategy": SAFAStrategy(total_clients=args.num_sensors),
         "AstraeaStrategy": AstraeaStrategy(),
         "TimeWeightedStrategy": TimeWeightedStrategy(),
-        "FedProxStrategy": FedProxStrategy(3), #max(1, args.num_sensors // 10)),
+        "FedProxStrategy": FedProxStrategy(1), #max(1, args.num_sensors // 10)),
         "FedAdamStrategy": FedAdamStrategy(),
         "QFedAvgStrategy": QFedAvgStrategy(),
-        "FedAdaptiveRL": FedAdaptiveRL()
+        "FedAdaptiveRL": FedAdaptiveRL(),
+        "AdaptiveAsyncStrategy": AdaptiveAsyncStrategy()
     } 
 
     # Get the strategy
