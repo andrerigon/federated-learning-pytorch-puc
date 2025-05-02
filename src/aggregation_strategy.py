@@ -265,6 +265,162 @@ class AdaptiveAsyncStrategy:
 
         return new_state
 
+import math, torch, logging
+from collections import OrderedDict, deque, defaultdict
+from typing import Dict, Any, List
+
+logger = logging.getLogger(__name__)
+
+class AdaptiveAsyncStrategyV2:
+    """
+    Adaptive‑Async V2
+    -----------------
+    * Buffered asynchronous aggregation (FedBuff‑style, size K)
+    * Staleness‑controlled mixing   λ = α/(1+β·s) · R · D · F
+    * Server‑side FedAdam / Yogi optimiser
+    * Optional first‑time boost to mitigate cold‑start
+    """
+
+    # ───────────────────────── configuration ───────────────────────────── #
+    def __init__(
+        self,
+        *,
+        initial_beta: float = 0.3,
+        final_beta: float   = 1.5,
+        initial_alpha: float = 0.4,
+        final_alpha: float   = 0.08,
+        first_client_boost: float = 5.8,
+        min_success_rate: float = 0.2,
+        window_samples: int = 4,
+        K_buffer: int = 12,             # #updates before an aggregation step
+        max_rounds: int = 100,
+        server_opt: str = "adam",       # "adam" | "yogi" | "sgd"
+        lr_server: float = 1e-3,
+        betas_server=(0.9, 0.99),
+    ):
+        self.initial_beta     = initial_beta
+        self.final_beta       = final_beta
+        self.initial_alpha    = initial_alpha
+        self.final_alpha      = final_alpha
+        self.first_boost      = first_client_boost
+        self.min_success_rate = min_success_rate
+
+        self.sample_history   = deque(maxlen=window_samples)
+        self.seen_clients: set[str] = set()
+
+        # training progress
+        self.round = 0
+        self.max_rounds = max_rounds
+
+        # FedBuff‑style buffer
+        self.K_buffer = K_buffer
+        self.buf: List[tuple[OrderedDict, float]] = []
+
+        # server‑side optimiser state
+        self.opt_name = server_opt.lower()
+        self.lr       = lr_server
+        self.betas    = betas_server
+        self.timestep = 0
+        self.m, self.v = None, None     # first/second moments for Adam/Yogi
+
+        logger.info(
+            "AdaptiveAsyncV2 init | α0=%.2f αT=%.2f β0=%.2f βT=%.2f K=%d"
+            " boost=%.1f opt=%s", initial_alpha, final_alpha,
+            initial_beta, final_beta, K_buffer, first_client_boost, server_opt.upper()
+        )
+
+    # ────────────────────────── public API ─────────────────────────────── #
+    def aggregate(
+        self,
+        global_model: torch.nn.Module,
+        client_state: OrderedDict,
+        *,
+        extra_info: Dict[str, Any] | None = None,
+    ) -> OrderedDict:
+        """
+        Buffer `client_state` (with its adaptive weight λ) and, once `K_buffer`
+        updates are collected, perform one server‑side optimisation step.
+        Returns the *possibly* updated global state at every call, so the caller
+        can keep broadcasting the freshest weights.
+        """
+        extra_info = extra_info or {}
+        self.round += 1
+
+        # ── adaptive coefficients ─────────────────────────────────────── #
+        progress  = min(self.round / self.max_rounds, 1.0)
+        beta      = self.initial_beta  + (self.final_beta  - self.initial_beta ) * progress
+        alpha     = self.initial_alpha + (self.final_alpha - self.initial_alpha) * (1 - progress)
+
+        cid           = extra_info.get("client_id", f"cid_{self.round}")
+        success_rate  = float(extra_info.get("success_rate", 1.0))
+        staleness     = int  (extra_info.get("staleness", 0))
+        n_samples     = int  (extra_info.get("n_samples", 1))
+
+        success_rate  = max(min(success_rate, 1.0), self.min_success_rate)
+        self.sample_history.append(n_samples)
+        mean_samples  = sum(self.sample_history) / len(self.sample_history)
+        first_factor  = self.first_boost if cid not in self.seen_clients else 1.0
+        self.seen_clients.add(cid)
+
+        # λ = α / (1+βs)  · R · D · F
+        S = 1.0 / (1.0 + beta * staleness)
+        R = success_rate
+        D = n_samples / mean_samples
+        lam = alpha * S * R * D * first_factor
+        lam = min(lam, alpha)           # capped, never > α
+
+        logger.debug(
+            "λ=%.4f α=%.3f β=%.3f s=%d p=%.2f N=%d/%d F=%.1f cid=%s",
+            lam, alpha, beta, staleness, success_rate, n_samples,
+            mean_samples, first_factor, cid
+        )
+
+        # ── buffer & early exit if not enough updates ─────────────────── #
+        self.buf.append((client_state, lam))
+        if len(self.buf) < self.K_buffer:
+            return global_model.state_dict()   # no change yet
+
+        # ── aggregate buffered updates (weighted mean) ────────────────── #
+        agg_state = OrderedDict()
+        tot_w = sum(w for _, w in self.buf)
+        for k in global_model.state_dict():
+            agg_state[k] = sum(w * s[k].to(global_model.state_dict()[k].device)
+                               for s, w in self.buf) / tot_w
+        self.buf.clear()
+
+        # ── server‑side optimisation step (Adam/Yogi/SGD) ─────────────── #
+        new_state = self._server_update(global_model.state_dict(), agg_state)
+        global_model.load_state_dict(new_state)
+        return new_state
+
+    # ─────────────────────── internal: optimiser step ─────────────────── #
+    def _server_update(self, g_state: OrderedDict, agg_state: OrderedDict) -> OrderedDict:
+        """Treat (g_state - agg_state) as a gradient and apply FedOpt."""
+        grad = OrderedDict((k, g_state[k] - agg_state[k]) for k in g_state)
+        self.timestep += 1
+
+        if self.opt_name == "sgd":
+            return OrderedDict((k, g_state[k] - self.lr * grad[k]) for k in g_state)
+
+        # initialise moments
+        if self.m is None:
+            self.m = OrderedDict((k, torch.zeros_like(p)) for k, p in g_state.items())
+            self.v = OrderedDict((k, torch.zeros_like(p)) for k, p in g_state.items())
+
+        β1, β2 = self.betas
+        eps    = 1e-8
+        new_state = OrderedDict()
+        for k in g_state:
+            g = grad[k]
+            self.m[k] = β1 * self.m[k] + (1 - β1) * g
+            if self.opt_name == "adam":
+                self.v[k] = β2 * self.v[k] + (1 - β2) * (g * g)
+            elif self.opt_name == "yogi":
+                self.v[k] = self.v[k] - (1 - β2) * torch.sign(self.v[k] - g * g) * (g * g)
+            m_hat = self.m[k] / (1 - β1 ** self.timestep)
+            v_hat = self.v[k] / (1 - β2 ** self.timestep)
+            new_state[k] = g_state[k] - self.lr * m_hat / (torch.sqrt(v_hat) + eps)
+        return new_state
 
     # def __init__(
     #     self,
@@ -664,64 +820,95 @@ class FedAdaptiveClientSelection(AggregationStrategy):
 class FedProxStrategy(AggregationStrategy):
     """
     Implementation of FedProx aggregation strategy from:
-    'Federated Optimization in Heterogeneous Networks'
-    Li et al., MLSys 2020 (DOI: 10.48550/arXiv.1812.06127)
+    'Federated Optimization in Heterogeneous Networks' Li et al., MLSys 2020
+    (DOI: 10.48550/arXiv.1812.06127).
+    On the server side, FedProx uses the same FedAvg aggregation but relies on
+    a proximal penalty added during local client training to stabilize updates in
+    heterogeneous environments.
     """
     def __init__(self, K: int):
         """
         Args:
-            K: Number of devices to select per round (subset of total devices N)
+            K (int): Number of devices to select per round (subset of total devices N).
         """
         super().__init__()
-        self.K = K  # Number of devices to aggregate per round
-        self.current_round_states = {}  # Store updates for current round
-        self.current_round_sizes = {}   # Store dataset sizes for current round
+        self.K = K
+        # Buffers to collect updates and sample sizes each round
+        self.current_round_states = {}
+        self.current_round_sizes = {}
 
-    def aggregate(self, global_model: nn.Module, client_state_dict: OrderedDict, 
-                    alpha=0.1, extra_info=None) -> OrderedDict:
-            """
-            Implements FedProx aggregation following Algorithm 2.
-            """
-            try:
+    def aggregate(
+        self,
+        global_model: torch.nn.Module,
+        client_state_dict: OrderedDict,
+        alpha: float = 1.0,
+        extra_info: Optional[dict] = None
+    ) -> OrderedDict:
+        """
+        Aggregates client updates using weighted FedAvg.
+        Optionally applies a server-side mixing factor alpha:
+            w_{t+1} = w_t + alpha * (w_avg - w_t)
 
-                if extra_info is None or 'client_id' not in extra_info:
-                    return global_model.state_dict()
-                    
-                client_id = extra_info['client_id']
-                dataset_size = extra_info.get('client_samples', 1)
-                
-                # Store this client's update and dataset size
-                self.current_round_states[client_id] = client_state_dict
-                self.current_round_sizes[client_id] = dataset_size
-                
-                # Only aggregate when we have received K updates
-                if len(self.current_round_states) < self.K:
-                    return global_model.state_dict()
-                    
-                # Initialize aggregation dict
-                global_dict = global_model.state_dict()
-                agg_dict = OrderedDict((k, torch.zeros_like(v)) for k, v in global_dict.items())
-                
-                total_samples = sum(self.current_round_sizes.values())
-                
-                # Weighted aggregation
-                for client_id, state_dict in self.current_round_states.items():
-                    weight = self.current_round_sizes[client_id] / total_samples
-                    for key in global_dict.keys():
-                        # Cast weight to the same dtype as the tensor
-                        weight_tensor = torch.tensor(weight, dtype=state_dict[key].dtype, device=state_dict[key].device)
-                        agg_dict[key] += state_dict[key] * weight_tensor
-                        
-                logger.info(f"Aggregated {len(self.current_round_states)} client updates")
-                
-                # Reset for next round
-                self.current_round_states = {}
-                self.current_round_sizes = {}
-                
-                return agg_dict
-            except Exception as e:
-                return global_model.state_dict()
+        Args:
+            global_model (nn.Module): The global model before aggregation.
+            client_state_dict (OrderedDict): State dict of a single client update.
+            alpha (float): Mixing coefficient for smoothing server update (default 1.0).
+            extra_info (dict): Must include 'client_id' and optionally 'client_samples'.
 
+        Returns:
+            OrderedDict: Updated global state dictionary after aggregation.
+        """
+        if extra_info is None or 'client_id' not in extra_info:
+            # No aggregation until valid client info is provided
+            return global_model.state_dict()
+
+        client_id = extra_info['client_id']
+        dataset_size = extra_info.get('client_samples', 1)
+
+        # Store this client's parameters and sample count
+        self.current_round_states[client_id] = client_state_dict
+        self.current_round_sizes[client_id] = dataset_size
+
+        # Wait for K client updates
+        if len(self.current_round_states) < self.K:
+            return global_model.state_dict()
+
+        # Begin aggregation (FedAvg)
+        global_state = global_model.state_dict()
+        agg_state = OrderedDict()
+        # Initialize accumulator: float for numeric params, clone others
+        for key, param in global_state.items():
+            if param.dtype.is_floating_point:
+                agg_state[key] = torch.zeros_like(param)
+            else:
+                agg_state[key] = param.clone()
+
+        total_samples = sum(self.current_round_sizes.values())
+
+        # Weighted aggregation: only keys present in both global and client states
+        for cid, client_state in self.current_round_states.items():
+            weight = self.current_round_sizes[cid] / total_samples
+            for key, client_param in client_state.items():
+                if key not in agg_state:
+                    # skip unexpected keys (e.g., fake-quant flags)
+                    continue
+                # accumulate only floating-point tensors
+                if not agg_state[key].dtype.is_floating_point:
+                    continue
+                agg_state[key] += client_param * weight
+
+        # Optional server-side smoothing
+        if alpha != 1.0:
+            for key, orig_param in global_state.items():
+                if not agg_state[key].dtype.is_floating_point:
+                    continue
+                agg_state[key] = orig_param + alpha * (agg_state[key] - orig_param)
+
+        # Reset buffers for next round
+        self.current_round_states.clear()
+        self.current_round_sizes.clear()
+
+        return agg_state
     
 class FedAdamStrategy(AggregationStrategy):
     """
