@@ -96,7 +96,7 @@ class FederatedLearningTrainer:
         self.global_model_version = new_version
         self.logger.info(f"Client {self.id}: Updated global model to version {new_version}")
 
-    def aggregate(self, global_model: nn.Module, client_dict: OrderedDict, alpha=0.3, extra_info=None) -> OrderedDict:
+    def aggregate(self, global_model: nn.Module, client_dict: OrderedDict, alpha=0.4, extra_info=None) -> OrderedDict:
         global_dict = global_model.state_dict()
         staleness = extra_info.get('staleness', 0) if extra_info else 0
         logger.info(f"Staleness will be: {staleness}")
@@ -282,51 +282,55 @@ class FederatedLearningTrainer:
             self.logger.error(f"Error in train_one_batch: {str(e)}", exc_info=True)
             raise  # Re-raise the exception after logging
 
-    def calculate_proximal_term(self, local_model, global_model_state_dict, mu=0.01):
+    def calculate_proximal_term(
+        self,
+        local_model: torch.nn.Module,
+        global_model_state_dict: OrderedDict,
+        mu: float = 0.01
+    ) -> torch.Tensor:
         """
         Calculates the proximal term from FedProx (Li et al., 2020).
-        
-        The proximal term helps to keep local models from deviating too far from the global model
-        during training, which is particularly important in heterogeneous networks.
-        
-        Formula: (μ/2) * ||w - w_t||^2 
+
+        The proximal term helps keep local models from deviating too far from the
+        global model during training, which is critical in heterogeneous networks.
+
+        Formula: (μ/2) * ||w - w_t||^2
         where:
             μ: proximal term coefficient
             w: local model parameters (weights and biases)
             w_t: global model parameters at round t
-        
+
         Args:
-            local_model (nn.Module): The current local model
-            global_model_state_dict (OrderedDict): State dict of global model parameters
-            mu (float): Proximal term coefficient (default: 0.01)
-            
+            local_model (nn.Module): The current local model.
+            global_model_state_dict (OrderedDict): Cloned state dict of global model parameters.
+            mu (float): Proximal term coefficient (default: 0.01).
+
         Returns:
-            torch.Tensor: The calculated proximal term loss
+            torch.Tensor: Scalar tensor of the proximal loss term.
         """
-        if not hasattr(self, 'use_proximal_term') or not self.use_proximal_term:
-            return 0.0
-            
-        try:
-            proximal_term = 0.0
-            
-            # Work directly with model parameters
-            for name, local_param in local_model.named_parameters():
-                if name not in global_model_state_dict:
-                    continue
-                    
-                global_param = global_model_state_dict[name]
-                
-                if local_param.shape != global_param.shape:
-                    continue
-                    
-                param_diff = local_param - global_param
-                proximal_term += (mu / 2) * torch.norm(param_diff) ** 2
-                
-            return proximal_term
-            
-        except Exception as e:
-            self.logger.error(f"Error calculating proximal term: {str(e)}", exc_info=True)
-            return 0.0  
+        # If proximal usage is disabled, return zero tensor on correct device
+        if not getattr(self, 'use_proximal_term', False):
+            device = next(local_model.parameters()).device
+            return torch.zeros(1, device=device)
+
+        # Prepare accumulator as a tensor for autograd
+        device = next(local_model.parameters()).device
+        dtype = next(local_model.parameters()).dtype
+        proximal_term = torch.zeros(1, device=device, dtype=dtype)
+
+        # Sum of squared differences across all parameters
+        for name, local_param in local_model.named_parameters():
+            global_param = global_model_state_dict.get(name)
+            if global_param is None or local_param.shape != global_param.shape:
+                continue
+            # Move global param to local device
+            global_param = global_param.to(device)
+            diff = local_param - global_param
+            proximal_term += torch.sum(diff * diff)
+
+        # Apply the coefficient outside the loop
+        proximal_term = (mu / 2) * proximal_term
+        return proximal_term
     
     def train_one_epoch(self, local_model, criterion_reconstruction, criterion_classification, optimizer, scheduler):
         running_reconstruction_loss = 0.0
