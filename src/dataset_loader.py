@@ -157,24 +157,25 @@ class DatasetLoader:
             logging.error(f"Failed to download dataset: {str(e)}")
             raise
 
-    def _split_dataset(self, dataset: Dataset) -> List[Subset]:
-        """
-        Split a dataset into roughly equal portions for each client.
-        
-        Args:
-            dataset: The complete dataset to be split
-            
-        Returns:
-            List of dataset subsets, one for each client
-        """
-        data_indices = list(range(len(dataset)))
-        split_indices = np.array_split(data_indices, self.num_clients)
-        client_datasets = [Subset(dataset, indices) for indices in split_indices]
-        
-        sizes = [len(subset) for subset in client_datasets]
-        logging.info(f"Split dataset into {len(sizes)} portions with sizes: {sizes}")
-        
-        return client_datasets
+    def _split_dataset(self, dataset: Dataset, labels_per_client: int = 2):
+        """Assign each client `labels_per_client` disjoint classes."""
+        targets = np.array(dataset.targets)          # CIFAR-10 labels
+        classes = np.unique(targets)
+
+        client_indices = [[] for _ in range(self.num_clients)]
+        # Shuffle class order so the assignment varies each run
+        np.random.shuffle(classes)
+
+        for client_id in range(self.num_clients):
+            # pick a slice of classes for this client
+            start = (client_id * labels_per_client) % len(classes)
+            chosen_classes = classes[start:start + labels_per_client]
+
+            # all indices whose label ∈ chosen_classes
+            mask = np.isin(targets, chosen_classes)
+            client_indices[client_id] = np.where(mask)[0].tolist()
+
+        return [Subset(dataset, idxs) for idxs in client_indices]
 
     def get_client_data_size(self, client_id: int) -> int:
         """
