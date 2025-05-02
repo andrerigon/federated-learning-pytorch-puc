@@ -31,7 +31,7 @@ from model_manager import ModelManager
 from image_classifier_autoencoders import  Autoencoder
 from federated_learning_trainer import FederatedLearningTrainer
 from federated_learning_aggregator import FederatedLearningAggregator
-from aggregation_strategy import AdaptiveAsyncStrategy, FedAdaptiveRL, QFedAvgStrategy, FedAdamStrategy,FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy, FedProxStrategy
+from aggregation_strategy import AdaptiveAsyncStrategyV2, AdaptiveAsyncStrategy, FedAdaptiveRL, QFedAvgStrategy, FedAdamStrategy,FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy, FedProxStrategy
 
 def custom_format(record):
     """
@@ -220,7 +220,7 @@ def main():
     parser.add_argument(
         "--strategy",
         type=str,
-        choices=["AdaptiveAsyncStrategy", "FedAvgStrategy","AsyncFedAvgStrategy","RELAYStrategy","SAFAStrategy","AstraeaStrategy","TimeWeightedStrategy", "FedProxStrategy", "FedAdamStrategy", "QFedAvgStrategy", "FedAdaptiveRL"],
+        choices=["AdaptiveAsyncStrategyV2", "AdaptiveAsyncStrategy", "FedAvgStrategy","AsyncFedAvgStrategy","RELAYStrategy","SAFAStrategy","AstraeaStrategy","TimeWeightedStrategy", "FedProxStrategy", "FedAdamStrategy", "QFedAvgStrategy", "FedAdaptiveRL"],
         required=True,
         help="Name of the strategy to use (e.g., FedAvgStrategy, SAFAStrategy).",
     )
@@ -287,6 +287,7 @@ def main():
         "FedAdamStrategy": FedAdamStrategy(),
         "QFedAvgStrategy": QFedAvgStrategy(),
         "FedAdaptiveRL": FedAdaptiveRL(),
+        "AdaptiveAsyncStrategyV2": AdaptiveAsyncStrategyV2(),
         "AdaptiveAsyncStrategy": AdaptiveAsyncStrategy()
     } 
 
@@ -435,31 +436,37 @@ def main():
     gc.collect()    
 
 if __name__ == "__main__":
-    max_attempts = 3
-    attempts = 0
-    exit_code = 1  # Default to error exit code
+    try: 
+        main()
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+    # max_attempts = 3
+    # attempts = 0
+    # exit_code = 1  # Default to error exit code
     
-    while attempts < max_attempts:
-        attempts += 1
-        try:
-            print(f"Attempt {attempts} of {max_attempts}")
-            main()
-            # If we get here, main() succeeded
-            print(f"Main function completed successfully on attempt {attempts}")
-            exit_code = 0
-            break  # Exit the retry loop
-        except Exception as e:
-            print(f"Attempt {attempts} failed with error: {e}")
-            import traceback
-            traceback.print_exc()
+    # while attempts < max_attempts:
+    #     attempts += 1
+    #     try:
+    #         print(f"Attempt {attempts} of {max_attempts}")
+    #         main()
+    #         # If we get here, main() succeeded
+    #         print(f"Main function completed successfully on attempt {attempts}")
+    #         exit_code = 0
+    #         break  # Exit the retry loop
+    #     except Exception as e:
+    #         print(f"Attempt {attempts} failed with error: {e}")
+    #         import traceback
+    #         traceback.print_exc()
             
-            if attempts < max_attempts:
-                # Optional: Add a delay before retrying
-                retry_delay = 2  # seconds
-                print(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-            else:
-                print(f"All {max_attempts} attempts failed")
+    #         if attempts < max_attempts:
+    #             # Optional: Add a delay before retrying
+    #             retry_delay = 2  # seconds
+    #             print(f"Retrying in {retry_delay} seconds...")
+    #             time.sleep(retry_delay)
+    #         else:
+    #             print(f"All {max_attempts} attempts failed")
     
     # This cleanup always runs
     try:
@@ -467,6 +474,7 @@ if __name__ == "__main__":
         subprocess.run("pkill -f torch_shm_manager", shell=True)
     except Exception as cleanup_error:
         print(f"Error during cleanup: {cleanup_error}")
-    
-    # Exit with appropriate code
-    sys.exit(exit_code)
+    print("\n\n\n\naaaaaaaa Exiting...")
+    sys.exit(0)
+    # # Exit with appropriate code
+    # sys.exit(exit_code)
