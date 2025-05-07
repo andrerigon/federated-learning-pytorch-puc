@@ -1,19 +1,11 @@
-"""
-DatasetLoader: A class for managing federated learning datasets.
-
-This class handles the loading, splitting, and distribution of the CIFAR-10 dataset
-for federated learning scenarios. It provides flexible data loading capabilities
-where different clients can access their specific portions of the data through
-the same DatasetLoader instance.
-"""
-
-from typing import Tuple, List, Optional
+from typing import Tuple, List
 from torch.utils.data import Subset, DataLoader, Dataset
-import torchvision
 import torchvision.transforms as transforms
 import numpy as np
 import torch
 import logging
+from torchvision.datasets import EuroSAT
+from torch.utils.data import random_split
 
 class DatasetLoader:
     """
@@ -79,11 +71,8 @@ class DatasetLoader:
         Raises:
             ValueError: If client_id is invalid
         """
-        # Validate client_id
         if not 0 <= client_id < self.num_clients:
             raise ValueError(f"Client ID must be between 0 and {self.num_clients-1}")
-        
-        # Automatically enable pin_memory if CUDA is available
         if torch.cuda.is_available() and not pin_memory:
             logging.info("CUDA detected, enabling pin_memory for improved performance")
             pin_memory = True
@@ -123,59 +112,47 @@ class DatasetLoader:
 
     def _download_dataset(self) -> Tuple[Dataset, Dataset]:
         """
-        Download and prepare the CIFAR-10 dataset with appropriate transforms.
+        Download and prepare the EuroSAT dataset with appropriate transforms.
         
         Returns:
             Tuple containing (training_dataset, test_dataset)
         """
         transform = transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(32, padding=4),
+            transforms.Resize((32, 32)),  # match your autoencoder input
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            transforms.Normalize((0.5, 0.5, 0.5),
+                                 (0.5, 0.5, 0.5))
         ])
 
         try:
-            trainset = torchvision.datasets.CIFAR10(
-                root='./data',
-                train=True,
+            full = EuroSAT(
+                root='./data/eurosat',
                 download=True,
                 transform=transform
             )
+
+            # 80/20 train/test split
+            n = len(full)
+            n_train = int(0.8 * n)
+            trainset, testset = random_split(full, [n_train, n - n_train])
             
-            testset = torchvision.datasets.CIFAR10(
-                root='./data',
-                train=False,
-                download=True,
-                transform=transform
-            )
-            
-            logging.info("Successfully downloaded and prepared CIFAR-10 dataset")
+            logging.info("Successfully downloaded and prepared EuroSAT dataset")
             return trainset, testset
             
         except Exception as e:
             logging.error(f"Failed to download dataset: {str(e)}")
             raise
 
-    def _split_dataset(self, dataset: Dataset, labels_per_client: int = 2):
-        """Assign each client `labels_per_client` disjoint classes."""
-        targets = np.array(dataset.targets)          # CIFAR-10 labels
-        classes = np.unique(targets)
-
-        client_indices = [[] for _ in range(self.num_clients)]
-        # Shuffle class order so the assignment varies each run
-        np.random.shuffle(classes)
-
-        for client_id in range(self.num_clients):
-            # pick a slice of classes for this client
-            start = (client_id * labels_per_client) % len(classes)
-            chosen_classes = classes[start:start + labels_per_client]
-
-            # all indices whose label ∈ chosen_classes
-            mask = np.isin(targets, chosen_classes)
-            client_indices[client_id] = np.where(mask)[0].tolist()
-
-        return [Subset(dataset, idxs) for idxs in client_indices]
+    def _split_dataset(self, dataset: Dataset, labels_per_client: int = 2) -> List[Subset]:
+        """
+        Assign each client an IID shard of the dataset, ignoring labels_per_client.
+        Works on Subset or any Dataset.
+        """
+        total = len(dataset)
+        indices = np.arange(total)
+        np.random.shuffle(indices)
+        shards = np.array_split(indices, self.num_clients)
+        return [Subset(dataset, shard.tolist()) for shard in shards]
 
     def get_client_data_size(self, client_id: int) -> int:
         """
@@ -196,5 +173,5 @@ class DatasetLoader:
 
     @property
     def num_classes(self) -> int:
-        """Number of classes in the dataset (10 for CIFAR-10)."""
+        """Number of classes in the dataset (10 for EuroSAT)."""
         return 10

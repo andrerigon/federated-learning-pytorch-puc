@@ -178,10 +178,10 @@ class FederatedLearningTrainer:
             self.logger.info(f"Training thread stopped.")
 
         # Evaluate the local model if it exists
-        if hasattr(self, 'local_model'):
-            self.evaluate_model(self.local_model)
-        else:
-            self.logger.warning(f"No local model available for evaluation.")
+        # if hasattr(self, 'local_model'):
+        #     self.evaluate_model(self.local_model)
+        # else:
+        #     self.logger.warning(f"No local model available for evaluation.")
 
         # Flush metrics (write to TensorBoard and generate plots)
         self.metrics_logger.flush()
@@ -426,8 +426,8 @@ class FederatedLearningTrainer:
         # Adjust learning rate
         scheduler.step(running_reconstruction_loss / len(self.loader))
 
-        if self.training_cycles % 10 == 0:
-            self.evaluate_model(self.local_model)
+        # if self.training_cycles % 10 == 0:
+        #     self.evaluate_model(self.local_model)
 
         return running_reconstruction_loss, running_classification_loss
    

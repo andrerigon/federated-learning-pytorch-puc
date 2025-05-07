@@ -435,6 +435,7 @@ def main():
     del simulation
     gc.collect()    
 
+
 if __name__ == "__main__":
     try: 
         main()
@@ -442,39 +443,18 @@ if __name__ == "__main__":
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
-    # max_attempts = 3
-    # attempts = 0
-    # exit_code = 1  # Default to error exit code
-    
-    # while attempts < max_attempts:
-    #     attempts += 1
-    #     try:
-    #         print(f"Attempt {attempts} of {max_attempts}")
-    #         main()
-    #         # If we get here, main() succeeded
-    #         print(f"Main function completed successfully on attempt {attempts}")
-    #         exit_code = 0
-    #         break  # Exit the retry loop
-    #     except Exception as e:
-    #         print(f"Attempt {attempts} failed with error: {e}")
-    #         import traceback
-    #         traceback.print_exc()
-            
-    #         if attempts < max_attempts:
-    #             # Optional: Add a delay before retrying
-    #             retry_delay = 2  # seconds
-    #             print(f"Retrying in {retry_delay} seconds...")
-    #             time.sleep(retry_delay)
-    #         else:
-    #             print(f"All {max_attempts} attempts failed")
-    
-    # This cleanup always runs
-    try:
-        print("Cleaning up resources...")
-        subprocess.run("pkill -f torch_shm_manager", shell=True)
-    except Exception as cleanup_error:
-        print(f"Error during cleanup: {cleanup_error}")
-    print("\n\n\n\naaaaaaaa Exiting...")
-    sys.exit(0)
-    # # Exit with appropriate code
-    # sys.exit(exit_code)
+    finally:
+        # This cleanup always runs, even if there's an exception
+        try:
+            print("Cleaning up resources...")
+            # Kill any lingering torch shared memory managers
+            subprocess.run("pkill -f torch_shm_manager", shell=True)
+            # Force terminate any lingering python processes that might be stuck
+            current_pid = os.getpid()
+            subprocess.run(f"pkill -9 -P {current_pid}", shell=True, stderr=subprocess.DEVNULL)
+        except Exception as cleanup_error:
+            print(f"Error during cleanup: {cleanup_error}")
+        
+        print("Exiting...")
+        # Force exit to ensure we don't hang
+        os._exit(0)  # Use os._exit instead of sys.exit to force immediate termination

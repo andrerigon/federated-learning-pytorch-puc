@@ -341,7 +341,7 @@ function mark_completed() {
 # Count total simulations
 ######################################################
 TOTAL_SIMULATIONS=0
-NUM_SIMULATIONS=5  # per configuration
+NUM_SIMULATIONS=3  # per configuration
 SKIPPED_SIMULATIONS=0
 
 for GRID_SIZE in "${GRIDS[@]}"; do
