@@ -245,6 +245,8 @@ def main():
         colorize=True
     )
 
+    # logger.add(sys.stderr, level="INFO", format="{time} {level} {message}")
+
     logger.add(
         f"{tensor_dir}/sensors_{timestamp}.log",
         level="INFO",
@@ -395,6 +397,7 @@ def main():
     node = simulation.get_node(sensor_ids[0])
     print(f"\n\n\nprotocol: {node.protocol_encapsulator.protocol.bla()}\n\n\n")
 
+    # make this a set instead of a list to  save memory
     positions = []
     sensor_positions_log = []
 
@@ -411,12 +414,16 @@ def main():
     # training_cycles = args.training_cycles
     while simulation.step_simulation() and keep_going:
         if all(t.converged for t in aggregators):
+            logger.info("Converged. Stopping simulation.")
             keep_going = False
             for a in aggregators:
                 a.stop()
+            logger.info("Converged. Aggregators stopped.")                
             for t in trainers: 
                 t.stop()
+            logger.info("Converged. Trainers stopped.")    
             simulation._finalize_simulation()
+            logger.info("Converged. Simulation finished.")
             break
   
         current_time = simulation._current_timestamp
@@ -431,9 +438,11 @@ def main():
                 "z": leader_position[2],
             })
 
-    plot_path(positions, sensor_positions_log, output_dir)
+    # plot_path(positions, sensor_positions_log, output_dir)
+    logger.info("Path plotted.")
     del simulation
     gc.collect()    
+    logger.info("Simulation cleaned up.")
 
 
 if __name__ == "__main__":

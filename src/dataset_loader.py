@@ -1,177 +1,137 @@
-from typing import Tuple, List
-from torch.utils.data import Subset, DataLoader, Dataset
-import torchvision.transforms as transforms
+from __future__ import annotations
+import json
+import pathlib
+import random
+from typing import List, Tuple
 import numpy as np
 import torch
-import logging
-from torchvision.datasets import EuroSAT
-from torch.utils.data import random_split
+from torch.utils.data import Dataset, DataLoader, Subset, random_split
+from torchvision import transforms
+from PIL import Image
 
+# ─────────────────────────────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────
+ROOT = pathlib.Path("./data/iwildcam_full")  # base data directory
+JPG_DIR = ROOT / "jpg"                     # where extractor put class folders
+SPECIES_MAP = JPG_DIR / "species_map.json"  # optional mapping class_id -> species name
+IMG_SIZE = (32, 32)
+
+# ─────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────
+def _load_species_map() -> List[str]:
+    """
+    Load species names sorted by class_id. If mapping file is missing,
+    fall back to folder names.
+    """
+    if SPECIES_MAP.exists():
+        mapping = json.loads(SPECIES_MAP.read_text())
+        # ensure order by numeric key
+        return [mapping[str(i)] for i in range(len(mapping))]
+    # fallback: use folder names (0,1,...)
+    dirs = [d.name for d in JPG_DIR.iterdir() if d.is_dir()]
+    # sort by integer value
+    dirs = sorted(dirs, key=lambda x: int(x))
+    return dirs
+
+# ─────────────────────────────────────────────────────────────────────
+# DATASET PREPARATION
+# ─────────────────────────────────────────────────────────────────────
+def _prepare_dataset() -> Tuple[List[Tuple[pathlib.Path,int]], List[str]]:
+    """
+    Scan JPG_DIR for subfolders and build (filepath, label) pairs and class list.
+    """
+    species = _load_species_map()
+    samples: List[Tuple[pathlib.Path,int]] = []
+    for label, sp in enumerate(species):
+        folder = JPG_DIR / str(label)
+        if not folder.is_dir():
+            raise FileNotFoundError(f"Class folder not found: {folder}")
+        for img_path in sorted(folder.iterdir()):
+            if img_path.suffix.lower() in ('.jpg', '.jpeg', '.png'):
+                samples.append((img_path, label))
+    if not samples:
+        raise RuntimeError(f"No images found under {JPG_DIR}")
+    return samples, species
+
+# ─────────────────────────────────────────────────────────────────────
+# TORCH DATASET
+# ─────────────────────────────────────────────────────────────────────
+_transform = transforms.Compose([
+    transforms.Resize(IMG_SIZE),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,)*3, (0.5,)*3),
+])
+
+class BrazilTop10Dataset(Dataset):
+    def __init__(self, samples: List[Tuple[pathlib.Path,int]]):
+        self.samples = samples
+    def __len__(self) -> int:
+        return len(self.samples)
+    def __getitem__(self, idx: int):
+        path, label = self.samples[idx]
+        img = Image.open(path).convert("RGB")
+        return _transform(img), label
+
+# ─────────────────────────────────────────────────────────────────────
+# PUBLIC DATA LOADER
+# ─────────────────────────────────────────────────────────────────────
 class DatasetLoader:
-    """
-    Manages dataset operations for federated learning clients.
-    
-    This class handles dataset downloading, preprocessing, and splitting for federated
-    learning scenarios. Instead of being tied to a specific client, it can create
-    loaders for any client ID on demand, making it more flexible and reusable.
-    
-    Attributes:
-        num_clients (int): Total number of clients in federated learning setup
-        testset (Dataset): Complete test dataset shared by all clients
-        client_datasets (List[Subset]): List of dataset portions for each client
-    """
-
     def __init__(self, num_clients: int):
-        """
-        Initialize the dataset loader with the total number of clients.
-        
-        Args:
-            num_clients: Total number of clients participating in federated learning
-            
-        Raises:
-            ValueError: If num_clients < 1
-            RuntimeError: If dataset download or preparation fails
-        """
         if num_clients < 1:
-            raise ValueError("Number of clients must be at least 1")
-            
+            raise ValueError("num_clients must be >= 1")
         self.num_clients = num_clients
-        
-        try:
-            # Download and prepare datasets
-            trainset, self.testset = self._download_dataset()
-            # Split training set into portions for each client
-            self.client_datasets = self._split_dataset(trainset)
-            logging.info(f"Initialized DatasetLoader for {num_clients} clients")
-        except Exception as e:
-            logging.error(f"Failed to initialize DatasetLoader: {str(e)}")
-            raise RuntimeError(f"Dataset initialization failed: {str(e)}")
 
-    def loader(self, 
+        samples, self.classes = _prepare_dataset()
+        full_dataset = BrazilTop10Dataset(samples)
+
+        # train/test split (80/20)
+        total = len(full_dataset)
+        n_train = int(0.8 * total)
+        train_ds, test_ds = random_split(full_dataset, [n_train, total - n_train])
+        self.testset = test_ds
+
+        # split train IID
+        idxs = np.random.permutation(len(train_ds))
+        shards = np.array_split(idxs, num_clients)
+        self.client_datasets = [Subset(train_ds, shard.tolist()) for shard in shards]
+
+    def loader(self,
                client_id: int,
                batch_size: int = 32,
                shuffle: bool = False,
                num_workers: int = 0,
-               persistent_workers: bool = True,
-               pin_memory: bool = False) -> DataLoader:
-        """
-        Create a DataLoader for a specific client's portion of the dataset.
-        
-        Args:
-            client_id: Identifier for the client (0 to num_clients-1)
-            batch_size: Number of samples per batch
-            shuffle: Whether to shuffle the data at each epoch
-            num_workers: Number of subprocesses for data loading
-            persistent_workers: Whether to maintain worker processes between iterations
-            pin_memory: Whether to pin memory in GPU training
-            
-        Returns:
-            DataLoader configured with the specified parameters for the client's dataset
-            
-        Raises:
-            ValueError: If client_id is invalid
-        """
-        if not 0 <= client_id < self.num_clients:
-            raise ValueError(f"Client ID must be between 0 and {self.num_clients-1}")
-        if torch.cuda.is_available() and not pin_memory:
-            logging.info("CUDA detected, enabling pin_memory for improved performance")
-            pin_memory = True
-            
+               pin_memory: bool = None) -> DataLoader:
+        if not (0 <= client_id < self.num_clients):
+            raise ValueError(f"client_id must be between 0 and {self.num_clients-1}")
+        if pin_memory is None:
+            pin_memory = torch.cuda.is_available()
         return DataLoader(
             dataset=self.client_datasets[client_id],
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
-            persistent_workers=persistent_workers and num_workers > 0,
             pin_memory=pin_memory
         )
 
-    def test_loader(self, 
-                   batch_size: int = 32,
-                   shuffle: bool = False,
-                   num_workers: int = 0) -> DataLoader:
-        """
-        Create a DataLoader for the test dataset.
-        
-        Args:
-            batch_size: Number of samples per batch
-            shuffle: Whether to shuffle the data
-            num_workers: Number of subprocesses for data loading
-            
-        Returns:
-            DataLoader for the complete test dataset
-        """
+    def test_loader(self,
+                    batch_size: int = 32,
+                    shuffle: bool = False,
+                    num_workers: int = 0) -> DataLoader:
         return DataLoader(
             dataset=self.testset,
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
-            persistent_workers=num_workers > 0,
             pin_memory=torch.cuda.is_available()
         )
 
-    def _download_dataset(self) -> Tuple[Dataset, Dataset]:
-        """
-        Download and prepare the EuroSAT dataset with appropriate transforms.
-        
-        Returns:
-            Tuple containing (training_dataset, test_dataset)
-        """
-        transform = transforms.Compose([
-            transforms.Resize((32, 32)),  # match your autoencoder input
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5),
-                                 (0.5, 0.5, 0.5))
-        ])
-
-        try:
-            full = EuroSAT(
-                root='./data/eurosat',
-                download=True,
-                transform=transform
-            )
-
-            # 80/20 train/test split
-            n = len(full)
-            n_train = int(0.8 * n)
-            trainset, testset = random_split(full, [n_train, n - n_train])
-            
-            logging.info("Successfully downloaded and prepared EuroSAT dataset")
-            return trainset, testset
-            
-        except Exception as e:
-            logging.error(f"Failed to download dataset: {str(e)}")
-            raise
-
-    def _split_dataset(self, dataset: Dataset, labels_per_client: int = 2) -> List[Subset]:
-        """
-        Assign each client an IID shard of the dataset, ignoring labels_per_client.
-        Works on Subset or any Dataset.
-        """
-        total = len(dataset)
-        indices = np.arange(total)
-        np.random.shuffle(indices)
-        shards = np.array_split(indices, self.num_clients)
-        return [Subset(dataset, shard.tolist()) for shard in shards]
-
     def get_client_data_size(self, client_id: int) -> int:
-        """
-        Get the number of samples assigned to a specific client.
-        
-        Args:
-            client_id: The client's identifier
-            
-        Returns:
-            Number of samples in the client's dataset portion
-            
-        Raises:
-            ValueError: If client_id is invalid
-        """
-        if not 0 <= client_id < self.num_clients:
-            raise ValueError(f"Client ID must be between 0 and {self.num_clients-1}")
+        if not (0 <= client_id < self.num_clients):
+            raise ValueError(f"client_id must be between 0 and {self.num_clients-1}")
         return len(self.client_datasets[client_id])
 
     @property
     def num_classes(self) -> int:
-        """Number of classes in the dataset (10 for EuroSAT)."""
-        return 10
+        return len(self.classes)

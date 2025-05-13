@@ -121,7 +121,7 @@ class TBA:
 
         # remove runs missing key metrics
         df = self.df.dropna(subset=["final_accuracy", "convergence_time"]).copy()
-        df["bubble"] = df["total_updates"].fillna(0).astype(float).clip(lower=5)
+        df["bubble"] = df["total_updates"].fillna(0).astype(float).clip(lower=45)
 
         # normalise metrics for radar
         radar_cols = ["final_accuracy", "convergence_time", "total_updates", "total_messages"]
