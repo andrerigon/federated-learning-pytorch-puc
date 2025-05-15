@@ -426,17 +426,17 @@ def main():
             logger.info("Converged. Simulation finished.")
             break
   
-        current_time = simulation._current_timestamp
+        # current_time = simulation._current_timestamp
         # for leader_id in leader_ids:
         #     leader_position = simulation.get_node(leader_id).position
-        #     # positions.append({
-        #     #     "role": "UAV",
-        #     #     "agent": leader_id,
-        #     #     "timestamp": current_time,
-        #     #     "x": leader_position[0],
-        #     #     "y": leader_position[1],
-        #     #     "z": leader_position[2],
-        #     # })
+        #     positions.append({
+        #         "role": "UAV",
+        #         "agent": leader_id,
+        #         "timestamp": current_time,
+        #         "x": leader_position[0],
+        #         "y": leader_position[1],
+        #         "z": leader_position[2],
+        #     })
 
     # plot_path(positions, sensor_positions_log, output_dir)
     logger.info("Path plotted.")

@@ -1,30 +1,46 @@
-# Use a lightweight Python base image
-FROM python:3.12.4-slim AS builder
-COPY requirements.txt .
+# ──────────────────────────────────────────────────────────────
+# Stage 1 ─ build wheelhouse with native optimisations
+# ──────────────────────────────────────────────────────────────
+FROM python:3.12-slim-bookworm AS builder
 
-# Install necessary system dependencies
+# deps for numpy / torch wheels
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+        build-essential git && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN CFLAGS="-march=native -O2" pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt .
+ENV PIP_DEFAULT_TIMEOUT=100 \
+    PIP_NO_CACHE_DIR=1 \
+    CFLAGS="-march=native -O2"
 
-FROM python:3.12.4-slim
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+RUN pip wheel -r requirements.txt -w /wheels
 
-ENV OMP_NUM_THREADS=10
-ENV MKL_NUM_THREADS=10
-ENV NUMEXPR_MAX_THREADS=10
+# ──────────────────────────────────────────────────────────────
+# Stage 2 ─ final runtime image
+# ──────────────────────────────────────────────────────────────
+FROM python:3.12-slim-bookworm
 
-# Copy source code and application files only in final steps to trigger rebuilds only if source changes
-COPY src/ /app/src/
-COPY data/ /app/data/
+# basic runtime libs only (no build-toolchain)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libopenblas0 \
+        && rm -rf /var/lib/apt/lists/*
 
-# Set working directory and expose volume for output
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir /wheels/*
+
+# sensible thread caps – honoured by PyTorch & NumPy
+ENV OMP_NUM_THREADS=20 \
+    MKL_NUM_THREADS=20 \
+    NUMEXPR_MAX_THREADS=20 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# copy code late so rebuilds when code changes
 WORKDIR /app
-RUN mkdir -p /app/output
-VOLUME /app/output
+COPY src/ ./src
+RUN mkdir -p /data        
 
-# Define the entrypoint for easier parameter passing
-ENTRYPOINT ["python", "src/simulation.py"]
+# keep working dir & entrypoint as before
+WORKDIR /app
+COPY src/ ./src          
+RUN mkdir -p /app/runs
+ENTRYPOINT ["python", "-u", "src/simulation.py"]
