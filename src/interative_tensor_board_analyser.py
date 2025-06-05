@@ -56,7 +56,7 @@ class TBA:
                     js = json.load(open(fm))
 
                     strat = next((p for p in fm.split(os.sep)
-                                  if p.endswith("Strategy")), "UnknownStrategy")
+                                  if p.endswith("Strategy")), "AdaptiveAsyncV2")
 
                     perf, comm, stale = (js.get(k, {}) for k in
                                          ("performance", "communication",
@@ -382,7 +382,7 @@ class TBA:
 
         # open browser & run
         webbrowser.open_new_tab(f"http://127.0.0.1:{port}")
-        app.run(debug=False, port=port)
+        app.run(debug=False, host="0.0.0.0", port=port)
 
 
 # ---------------- CLI ----------------

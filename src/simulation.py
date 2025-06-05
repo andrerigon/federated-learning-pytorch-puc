@@ -25,6 +25,7 @@ from tqdm import tqdm
 import sys
 import time
 import subprocess
+import warnings
 
 from dataset_loader import DatasetLoader
 from model_manager import ModelManager
@@ -32,6 +33,10 @@ from image_classifier_autoencoders import  Autoencoder
 from federated_learning_trainer import FederatedLearningTrainer
 from federated_learning_aggregator import FederatedLearningAggregator
 from aggregation_strategy import AdaptiveAsyncStrategyV2, AdaptiveAsyncStrategy, FedAdaptiveRL, QFedAvgStrategy, FedAdamStrategy,FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy, FedProxStrategy
+
+# Suppress specific numpy/scikit-learn warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='sklearn.utils.extmath')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='numpy.core._multiarray_umath')
 
 def custom_format(record):
     """
