@@ -294,7 +294,7 @@ def main():
         "FedAdamStrategy": FedAdamStrategy(),
         "QFedAvgStrategy": QFedAvgStrategy(),
         "FedAdaptiveRL": FedAdaptiveRL(),
-        "AdaptiveAsyncStrategyV2": AdaptiveAsyncStrategyV2(),
+        "AdaptiveAsyncStrategyV2": AdaptiveAsyncStrategyV2(batch_size=args.num_sensors),
         "AdaptiveAsyncStrategy": AdaptiveAsyncStrategy()
     } 
 
