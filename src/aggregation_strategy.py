@@ -409,10 +409,10 @@ class AdaptiveAsyncStrategyV2:
             "network_mode_changes": 0
         }
 
-        logger.info(f"Initialized AdaptiveAsyncStrategy with: initial_beta={initial_beta}, " 
+        logger.info(f"Initialized AdaptiveAsyncStrategyV2 with: initial_beta={initial_beta}, " 
                    f"final_beta={final_beta}, initial_alpha={initial_alpha}, "
                    f"final_alpha={final_alpha}, first_client_boost={first_client_boost}, "
-                   f"batching={'enabled' if enable_batching else 'disabled'}")
+                   f"batching={'enabled' if enable_batching else 'disabled'} with size={self.batch_size}")
 
     def assess_network_quality(self, current_success_rate: float) -> bool:
         """
