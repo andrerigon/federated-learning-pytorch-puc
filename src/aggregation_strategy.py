@@ -7,7 +7,6 @@ import torch.nn as nn
 import threading
 import torch
 import torch.nn as nn
-import logging
 import time
 import math
 from model_manager import ModelManager
@@ -31,6 +30,8 @@ from torch.optim import Adam
 from collections import OrderedDict
 from typing import Dict, Any
 import random 
+import numpy as np
+
 
 class AggregationStrategy(ABC):
     @abstractmethod
@@ -265,238 +266,730 @@ class AdaptiveAsyncStrategy:
 
         return new_state
 
-import math, torch, logging
-from collections import OrderedDict, deque, defaultdict
-from typing import Dict, Any, List
-
-logger = logging.getLogger(__name__)
-
 class AdaptiveAsyncStrategyV2:
     """
-    Adaptive‑Async V2
-    -----------------
-    * Buffered asynchronous aggregation (FedBuff‑style, size K)
-    * Staleness‑controlled mixing   λ = α/(1+β·s) · R · D · F
-    * Server‑side FedAdam / Yogi optimiser
-    * Optional first‑time boost to mitigate cold‑start
+    Adaptive‑Async Strategy with Intelligent Batching
+    -------------------------------------------------
+
+    Esta versão mantém a simplicidade da implementação original mas adiciona
+    batching inteligente baseado na qualidade da rede, similar ao FedAvg/FedProx
+    quando as condições permitem.
+
+    Contract
+    ~~~~~~~~
+        aggregate(global_model, client_dict, alpha=0.1, extra_info=None)
+
+        * `global_model`      : the *live* nn.Module on the UAV
+        * `client_dict`       : **state‑dict from ONE sensor**
+        * `alpha`             : base learning‑rate (same as FedAvg parameter)
+        * `extra_info` (dict) : metadata that comes in the sensor's message
+
+              Expected keys (all optional – safe fall‑backs are used):
+                  client_id            str   unique sensor id
+                  local_model_version  int   model version used for training
+                  global_model_version int   value broadcast when training started
+                  staleness            int   if pre‑computed by the sensor
+                  success_rate         float [0,1] link reliability measure
+                  n_samples            int   #samples used for local training
+
+    Update rule
+    -----------
+        w^{t+1} = w^{t} + λ · (w_client − w^{t})
+
+        λ = α · S(staleness) · R(success_rate) · D(n_samples) · F(first_time)
+
+        • S(s) = exp(−β * s)                ( β > 0  → faster decay )
+        • R(p) = max(p, min_success_rate)   ( p ∈ [0,1] )
+        • D(N) = N / moving_avg(N_all)      ( optional, defaults 1 )
+        • F(new) = boost_factor if new client, else 1.0
+
+        When metadata is missing the corresponding factor is 1,
+        turning the rule into plain incremental FedAvg.
+        
+    Adaptive parameters:
+        • β starts low and increases over time to be more forgiving early
+        • α starts high and decreases over time for faster early convergence
+        • Momentum is used to accelerate training
+        
+    Intelligent Batching (NEW):
+        • Monitors network quality using a sliding window of success rates
+        • In good network conditions (avg success rate ≥ threshold), accumulates updates
+        • In poor network conditions, processes immediately (original behavior)
+        • This combines the efficiency of synchronous methods in stable networks
+          with the robustness of asynchronous methods in unstable networks
+        
+    Optimization Notes:
+        This implementation includes several optimizations to address convergence time issues:
+        
+        1. First-Client Boost: Each client's first update is amplified by a boost factor (default 3.0x)
+           to overcome cold start issues and jumpstart the learning process.
+           
+        2. Progressive Staleness Handling: Instead of a fixed high staleness penalty that overly
+           discounts updates, we use a gradually increasing penalty that's very forgiving early
+           in training (β=0.1) and becomes stricter over time (β=0.7).
+           
+        3. Diminishing Learning Rate: Higher initial α (1.0) allows for faster early progress
+           when gradient directions are more reliable, gradually decreasing to α=0.3 for stability.
+           
+        4. Success Rate Floor: A minimum success rate ensures that even clients with poor
+           communication links still contribute meaningfully to the model.
+           
+        5. Momentum Acceleration: Incorporates momentum to accelerate convergence by accumulating
+           update directions across rounds, helping to overcome plateaus in the optimization landscape.
+           
+        6. Intelligent Batching: When network quality is good, accumulates multiple updates before
+           aggregating, similar to FedAvg/FedProx, improving efficiency while maintaining adaptiveness.
+           
+        These optimizations work together to significantly improve convergence time while
+        maintaining the adaptiveness of the strategy, with particular emphasis on addressing
+        cold start issues and making early training iterations more effective.
     """
 
-    # ───────────────────────── configuration ───────────────────────────── #
+    # ------------------------------- configuration ------------------------ #
     def __init__(
         self,
-        *,
-        initial_beta: float = 0.3,
-        final_beta: float   = 1.5,
-        initial_alpha: float = 0.4,
-        final_alpha: float   = 0.08,
-        first_client_boost: float = 5.8,
-        min_success_rate: float = 0.2,
-        window_samples: int = 4,
-        K_buffer: int = 12,             # #updates before an aggregation step
-        max_rounds: int = 100,
-        server_opt: str = "adam",       # "adam" | "yogi" | "sgd"
-        lr_server: float = 1e-3,
-        betas_server=(0.9, 0.99),
+        initial_beta: float = 0.1,      # Initial β - low staleness penalty at start
+        final_beta: float = 0.3,        # Final β - higher staleness penalty later
+        initial_alpha: float = 1.0,     # Initial α - aggressive updates early
+        final_alpha: float = 0.3,       # Final α - conservative later
+        first_client_boost: float = 5.0,# Boost factor for first update from client
+        min_success_rate: float = 0.5,  # Minimum success rate to consider
+        window_success: int = 1,        # #rounds used for avg success‑rate
+        window_samples: int = 2,        # #rounds for moving‑avg sample count
+        max_rounds: int = 100,          # Estimate of rounds until convergence
+        use_momentum: bool = False,     # Whether to use momentum
+        momentum: float = 0.9,          # Momentum coefficient
+        # New parameters for intelligent batching
+        enable_batching: bool = True,   # Enable intelligent batching
+        network_quality_window: int = 10,  # Window for network quality assessment
+        good_network_threshold: float = 0.65,  # Threshold for "good" network
+        batch_size: int = 5,            # Max updates to accumulate in good conditions
+        batch_timeout: float = 10.0,    # Max seconds to wait for batch
     ):
-        self.initial_beta     = initial_beta
-        self.final_beta       = final_beta
-        self.initial_alpha    = initial_alpha
-        self.final_alpha      = final_alpha
-        self.first_boost      = first_client_boost
+        # Basic settings (original)
+        self.initial_beta = initial_beta
+        self.final_beta = final_beta
+        self.initial_alpha = initial_alpha
+        self.final_alpha = final_alpha
+        self.first_client_boost = first_client_boost
         self.min_success_rate = min_success_rate
-
-        self.sample_history   = deque(maxlen=window_samples)
-        self.seen_clients: set[str] = set()
-
-        # training progress
-        self.round = 0
+        
+        # History tracking (original)
+        self.succ_history = defaultdict(lambda: deque(maxlen=window_success))
+        self.sample_history = deque(maxlen=window_samples)
+        self.seen_clients = set()  # Track clients we've seen before
+        
+        # Adaptive parameters (original)
+        self.current_round = 0
         self.max_rounds = max_rounds
+        
+        # Momentum (original)
+        self.use_momentum = use_momentum
+        self.momentum = momentum
+        self.velocity = None
+        
+        # Intelligent batching (new)
+        self.enable_batching = enable_batching
+        self.network_quality_window = network_quality_window
+        self.good_network_threshold = good_network_threshold
+        self.batch_size = batch_size
+        self.batch_timeout = batch_timeout
+        
+        # Batching state
+        self.network_quality_history = deque(maxlen=network_quality_window)
+        self.pending_updates = {}  # Dict[client_id, (client_dict, extra_info, lambda, factors)]
+        self.batch_start_time = None
+        self.is_good_network = False
+        
+        # Statistics
+        self.stats = {
+            "total_updates": 0,
+            "batches_processed": 0,
+            "immediate_updates": 0,
+            "network_mode_changes": 0
+        }
 
-        # FedBuff‑style buffer
-        self.K_buffer = K_buffer
-        self.buf: List[tuple[OrderedDict, float]] = []
+        logger.info(f"Initialized AdaptiveAsyncStrategyV2 with: initial_beta={initial_beta}, " 
+                   f"final_beta={final_beta}, initial_alpha={initial_alpha}, "
+                   f"final_alpha={final_alpha}, first_client_boost={first_client_boost}, "
+                   f"batching={'enabled' if enable_batching else 'disabled'} with size={self.batch_size}")
 
-        # server‑side optimiser state
-        self.opt_name = server_opt.lower()
-        self.lr       = lr_server
-        self.betas    = betas_server
-        self.timestep = 0
-        self.m, self.v = None, None     # first/second moments for Adam/Yogi
+    def assess_network_quality(self, current_success_rate: float) -> bool:
+        """
+        Assesses whether the network quality is good enough for batching.
+        
+        Returns True if average success rate is above threshold, False otherwise.
+        """
+        self.network_quality_history.append(current_success_rate)
+        
+        if len(self.network_quality_history) < 3:  # Need minimum samples
+            return False
+        
+        avg_quality = sum(self.network_quality_history) / len(self.network_quality_history)
+        
+        # Check if network mode changed
+        new_is_good = avg_quality >= self.good_network_threshold
+        if new_is_good != self.is_good_network:
+            self.stats["network_mode_changes"] += 1
+            logger.info(f"Network mode changed: {'Good' if new_is_good else 'Poor'} "
+                       f"(avg quality: {avg_quality:.2f})")
+        
+        return new_is_good
 
-        logger.info(
-            "AdaptiveAsyncV2 init | α0=%.2f αT=%.2f β0=%.2f βT=%.2f K=%d"
-            " boost=%.1f opt=%s", initial_alpha, final_alpha,
-            initial_beta, final_beta, K_buffer, first_client_boost, server_opt.upper()
+    def should_process_batch(self) -> bool:
+        """
+        Determines if the accumulated batch should be processed now.
+        
+        Returns True if:
+        - Batch size reached
+        - Timeout exceeded
+        - Network quality degraded
+        """
+        if not self.pending_updates:
+            return False
+        
+        # Check batch size
+        if len(self.pending_updates) >= self.batch_size:
+            logger.info(f"Processing batch: size limit reached ({len(self.pending_updates)} unique clients)")
+            return True
+        
+        # Check timeout
+        if self.batch_start_time is not None:
+            elapsed = time.time() - self.batch_start_time
+            if elapsed > self.batch_timeout:
+                logger.info(f"Processing batch: timeout reached ({elapsed:.1f}s)")
+                return True
+        
+        # Network no longer good
+        if not self.is_good_network:
+            logger.info(f"Processing batch: network quality degraded")
+            return True
+        
+        return False
+
+    def compute_lambda(self, extra_info: Dict[str, Any], progress: float, 
+                      effective_alpha: float, effective_beta: float) -> Tuple[float, Dict[str, float]]:
+        """
+        Computes the lambda (weighting factor) for a client update.
+        
+        Returns:
+            lambda value and a dict of individual factors for logging
+        """
+        # Extract metadata with defaults
+        cid = extra_info.get("client_id", f"unknown_{self.current_round}")
+        success_rate = float(extra_info.get("success_rate", 1.0))
+        staleness = int(extra_info.get("staleness", 0))
+        n_samples = int(extra_info.get("client_samples", extra_info.get("n_samples", 1)))
+
+        # If UAV broadcast / sensor stored the versions we can derive staleness
+        g_ver = extra_info.get("global_model_version")
+        l_ver = extra_info.get("local_model_version")
+        if staleness == 0 and (g_ver is not None and l_ver is not None):
+            staleness = max(g_ver - l_ver, 0)
+
+        # Clip for safety
+        success_rate = min(max(success_rate, 0.0), 1.0)
+
+        # Update histories
+        self.succ_history[cid].append(success_rate)
+        self.sample_history.append(n_samples)
+
+        # Check if first time client
+        first_time = cid not in self.seen_clients
+        self.seen_clients.add(cid)
+        first_time_factor = self.first_client_boost if first_time else 1.0
+
+        # Moving averages
+        mean_samples = (
+            sum(self.sample_history) / len(self.sample_history)
+            if self.sample_history
+            else n_samples
         )
+        
+        # Compute adaptive mixing λ
+        S = math.exp(-effective_beta * staleness)        # staleness factor
+        R = max(success_rate, self.min_success_rate)     # reliability factor with minimum
+        D = n_samples / mean_samples if mean_samples > 0 else 1.0  # data‑size factor
+        F = first_time_factor                            # first-time boost factor
+        
+        # Combine all factors
+        lam = effective_alpha * S * R * D * F
+        lam = max(0.0, min(1.0, lam))                    # keep in [0,1]
 
-    # ────────────────────────── public API ─────────────────────────────── #
+        # Return lambda and factors for logging
+        factors = {
+            "client_id": cid,
+            "staleness": staleness,
+            "success_rate": success_rate,
+            "n_samples": n_samples,
+            "S": S,
+            "R": R,
+            "D": D,
+            "F": F,
+            "alpha": effective_alpha,
+            "beta": effective_beta,
+            "lambda": lam,
+            "first_time": first_time
+        }
+        
+        return lam, factors
+
+    def process_batch(self, global_model: nn.Module) -> OrderedDict:
+        """
+        Processes all pending updates in the batch.
+        
+        When in good network conditions, this aggregates multiple client updates
+        similar to FedAvg/FedProx, but with adaptive weighting.
+        """
+        if not self.pending_updates:
+            return global_model.state_dict()
+        
+        logger.info(f"Processing batch of {len(self.pending_updates)} unique client updates")
+        
+        # Get current global state
+        g_state = global_model.state_dict()
+        
+        # Initialize accumulated update and total weight
+        accumulated_update = OrderedDict()
+        total_weight = 0.0
+        
+        # Initialize accumulated update tensors
+        for k, v in g_state.items():
+            accumulated_update[k] = torch.zeros_like(v, dtype=torch.float32)
+        
+        # Process each pending update
+        for client_dict, _, lam, factors in self.pending_updates.values():
+            # Log this client's contribution
+            logger.info(f"Batch member - Client {factors['client_id']}: λ={lam:.4f}")
+            
+            # Accumulate weighted update
+            for k, g_param in g_state.items():
+                if k in client_dict:
+                    c_param = client_dict[k].to(g_param.device)
+                    
+                    # Handle different dtypes properly
+                    if g_param.dtype in [torch.float32, torch.float64, torch.float16]:
+                        # For float types, direct computation
+                        diff = c_param - g_param
+                        accumulated_update[k] += lam * diff
+                    else:
+                        # For integer types, convert to float for computation
+                        g_param_float = g_param.float()
+                        c_param_float = c_param.float()
+                        diff = c_param_float - g_param_float
+                        # Will convert back when applying
+                        accumulated_update[k] += lam * diff
+            
+            total_weight += lam
+        
+        # Apply accumulated update with normalization
+        new_state = OrderedDict()
+        
+        if total_weight > 0:
+            # Initialize velocity if using momentum
+            if self.use_momentum and self.velocity is None:
+                self.velocity = OrderedDict()
+                for k, v in g_state.items():
+                    self.velocity[k] = torch.zeros_like(v, dtype=torch.float32)
+            
+            for k, g_param in g_state.items():
+                # Normalize the accumulated update
+                normalized_update = accumulated_update[k] / total_weight
+                
+                if self.use_momentum and self.velocity is not None:
+                    # Update with momentum
+                    self.velocity[k] = self.momentum * self.velocity[k] + normalized_update
+                    final_update = self.velocity[k]
+                else:
+                    final_update = normalized_update
+                
+                # Apply update with proper dtype handling
+                if g_param.dtype in [torch.float32, torch.float64, torch.float16]:
+                    new_state[k] = g_param + final_update
+                else:
+                    # For integer types, convert back
+                    new_state[k] = g_param + final_update.to(g_param.dtype)
+        else:
+            # No valid updates, keep current state
+            new_state = g_state
+        
+        # Clear batch
+        self.pending_updates.clear()
+        self.batch_start_time = None
+        self.stats["batches_processed"] += 1
+        
+        logger.info(f"Batch processed with total weight: {total_weight:.3f}")
+        
+        return new_state
+
+    # ----------------------------- public API ----------------------------- #
     def aggregate(
         self,
-        global_model: torch.nn.Module,
-        client_state: OrderedDict,
-        *,
+        global_model: nn.Module,
+        client_dict: OrderedDict,
+        alpha: float = 0.9,
         extra_info: Dict[str, Any] | None = None,
     ) -> OrderedDict:
         """
-        Buffer `client_state` (with its adaptive weight λ) and, once `K_buffer`
-        updates are collected, perform one server‑side optimisation step.
-        Returns the *possibly* updated global state at every call, so the caller
-        can keep broadcasting the freshest weights.
+        Aggregates client update with the global model using adaptive weighting.
+        
+        Uses staleness, success rate, and data size to determine how much influence
+        the client update should have on the global model. The weighting is also
+        adapted based on training progress to be more aggressive early and more
+        conservative later.
+        
+        NEW: In good network conditions, accumulates updates for batch processing.
         """
         extra_info = extra_info or {}
-        self.round += 1
+        self.current_round += 1
+        self.stats["total_updates"] += 1
+        
+        # Calculate training progress for adaptive parameters
+        progress = min(self.current_round / self.max_rounds, 1.0)
+        effective_beta = self.initial_beta + (self.final_beta - self.initial_beta) * progress
+        effective_alpha = self.initial_alpha + (self.final_alpha - self.initial_alpha) * (1 - progress)
+        
+        # Extract success rate for network assessment
+        success_rate = float(extra_info.get("success_rate", 1.0))
+        
+        # Assess network quality
+        if self.enable_batching:
+            self.is_good_network = self.assess_network_quality(success_rate)
+        
+        # Compute lambda for this update
+        lam, factors = self.compute_lambda(extra_info, progress, effective_alpha, effective_beta)
+        
+        # Log detailed information
+        logger.info(f"Client {factors['client_id']} (first_time={factors['first_time']}): "
+                   f"staleness={factors['staleness']}, success_rate={factors['success_rate']:.2f}, "
+                   f"samples={factors['n_samples']}, S={factors['S']:.3f}, R={factors['R']:.3f}, "
+                   f"D={factors['D']:.3f}, F={factors['F']:.1f}, "
+                   f"α={factors['alpha']:.2f}, β={factors['beta']:.2f}, λ={factors['lambda']:.4f}, "
+                   f"round={self.current_round}, network={'good' if self.is_good_network else 'poor'}")
+        
+        # Decide whether to batch or process immediately
+        if self.enable_batching and self.is_good_network and lam > 0:
+            # Good network: accumulate updates
+            if self.batch_start_time is None:
+                self.batch_start_time = time.time()
+            
+            cid = factors["client_id"]
+            self.pending_updates[cid] = (client_dict, extra_info, lam, factors)
+            
+            # Check if we should process the batch
+            if self.should_process_batch():
+                return self.process_batch(global_model)
+            else:
+                # Return current state without changes (accumulating)
+                logger.info(f"Update accumulated ({len(self.pending_updates)}/{self.batch_size}) [unique clients]")
+                return global_model.state_dict()
+        else:
+            # Poor network or batching disabled: process immediately
+            # First process any pending batch
+            if self.pending_updates:
+                logger.info("Network degraded, processing pending batch first")
+                _ = self.process_batch(global_model)
+            
+            # Then process current update immediately (original behavior)
+            self.stats["immediate_updates"] += 1
+            return self._process_single_update(global_model, client_dict, lam, factors)
 
-        # ── adaptive coefficients ─────────────────────────────────────── #
-        progress  = min(self.round / self.max_rounds, 1.0)
-        beta      = self.initial_beta  + (self.final_beta  - self.initial_beta ) * progress
-        alpha     = self.initial_alpha + (self.final_alpha - self.initial_alpha) * (1 - progress)
+    def _process_single_update(self, global_model: nn.Module, client_dict: OrderedDict,
+                              lam: float, factors: Dict[str, Any]) -> OrderedDict:
+        """
+        Processes a single update immediately (original AdaptiveAsync behavior).
+        """
+        new_state: OrderedDict = OrderedDict()
+        g_state = global_model.state_dict()
+        
+        # Initialize velocity if using momentum and not initialized yet
+        if self.use_momentum and self.velocity is None:
+            self.velocity = OrderedDict()
+            for k, v in g_state.items():
+                self.velocity[k] = torch.zeros_like(v, dtype=torch.float32)
+        
+        # Perform update with or without momentum
+        for k, g_param in g_state.items():
+            if k in client_dict:
+                c_param = client_dict[k].to(g_param.device)
+                
+                # Handle different dtypes
+                if g_param.dtype in [torch.float32, torch.float64, torch.float16]:
+                    # Calculate the update direction
+                    update = lam * (c_param - g_param)
+                    
+                    if self.use_momentum and self.velocity is not None:
+                        # Update with momentum
+                        self.velocity[k] = self.momentum * self.velocity[k] + update
+                        new_state[k] = g_param + self.velocity[k]
+                    else:
+                        # Standard update without momentum
+                        new_state[k] = g_param + update
+                else:
+                    # For integer types, use appropriate conversion
+                    g_param_float = g_param.float()
+                    c_param_float = c_param.float()
+                    update = lam * (c_param_float - g_param_float)
+                    
+                    if self.use_momentum and self.velocity is not None:
+                        self.velocity[k] = self.momentum * self.velocity[k] + update
+                        new_state[k] = g_param + self.velocity[k].to(g_param.dtype)
+                    else:
+                        new_state[k] = g_param + update.to(g_param.dtype)
+            else:
+                # If parameter doesn't exist in client model, keep global
+                new_state[k] = g_param
 
-        cid           = extra_info.get("client_id", f"cid_{self.round}")
-        success_rate  = float(extra_info.get("success_rate", 1.0))
-        staleness     = int  (extra_info.get("staleness", 0))
-        n_samples     = int  (extra_info.get("n_samples", 1))
-
-        success_rate  = max(min(success_rate, 1.0), self.min_success_rate)
-        self.sample_history.append(n_samples)
-        mean_samples  = sum(self.sample_history) / len(self.sample_history)
-        first_factor  = self.first_boost if cid not in self.seen_clients else 1.0
-        self.seen_clients.add(cid)
-
-        # λ = α / (1+βs)  · R · D · F
-        S = 1.0 / (1.0 + beta * staleness)
-        R = success_rate
-        D = n_samples / mean_samples
-        lam = alpha * S * R * D * first_factor
-        lam = min(lam, alpha)           # capped, never > α
-
-        logger.debug(
-            "λ=%.4f α=%.3f β=%.3f s=%d p=%.2f N=%d/%d F=%.1f cid=%s",
-            lam, alpha, beta, staleness, success_rate, n_samples,
-            mean_samples, first_factor, cid
-        )
-
-        # ── buffer & early exit if not enough updates ─────────────────── #
-        self.buf.append((client_state, lam))
-        if len(self.buf) < self.K_buffer:
-            return global_model.state_dict()   # no change yet
-
-        # ── aggregate buffered updates (weighted mean) ────────────────── #
-        agg_state = OrderedDict()
-        tot_w = sum(w for _, w in self.buf)
-        for k in global_model.state_dict():
-            agg_state[k] = sum(w * s[k].to(global_model.state_dict()[k].device)
-                               for s, w in self.buf) / tot_w
-        self.buf.clear()
-
-        # ── server‑side optimisation step (Adam/Yogi/SGD) ─────────────── #
-        new_state = self._server_update(global_model.state_dict(), agg_state)
-        global_model.load_state_dict(new_state)
         return new_state
 
-    # ─────────────────────── internal: optimiser step ─────────────────── #
-    def _server_update(self, g_state: OrderedDict, agg_state: OrderedDict) -> OrderedDict:
-        """Treat (g_state - agg_state) as a gradient and apply FedOpt."""
-        grad = OrderedDict((k, g_state[k] - agg_state[k]) for k in g_state)
-        self.timestep += 1
+    def get_statistics(self) -> Dict[str, Any]:
+        """
+        Returns statistics about the aggregation process.
+        """
+        return {
+            "current_round": self.current_round,
+            "total_updates": self.stats["total_updates"],
+            "batches_processed": self.stats["batches_processed"],
+            "immediate_updates": self.stats["immediate_updates"],
+            "network_mode_changes": self.stats["network_mode_changes"],
+            "seen_clients": len(self.seen_clients),
+            "is_good_network": self.is_good_network,
+            "pending_updates": len(self.pending_updates),
+            "avg_network_quality": sum(self.network_quality_history) / len(self.network_quality_history)
+                                  if self.network_quality_history else 0.0
+        }
 
-        if self.opt_name == "sgd":
-            return OrderedDict((k, g_state[k] - self.lr * grad[k]) for k in g_state)
+# class AdaptiveAsyncV2:
+#     """
+#     AdaptiveAsyncV2 Strategy
+#     ------------------------
 
-        # initialise moments
-        if self.m is None:
-            self.m = OrderedDict((k, torch.zeros_like(p)) for k, p in g_state.items())
-            self.v = OrderedDict((k, torch.zeros_like(p)) for k, p in g_state.items())
+#     An improved asynchronous federated learning aggregation strategy designed for
+#     robustness and performance in environments with unreliable communication
+#     and heterogeneous clients, typical in UAV-assisted IoT networks.
 
-        β1, β2 = self.betas
-        eps    = 1e-8
-        new_state = OrderedDict()
-        for k in g_state:
-            g = grad[k]
-            self.m[k] = β1 * self.m[k] + (1 - β1) * g
-            if self.opt_name == "adam":
-                self.v[k] = β2 * self.v[k] + (1 - β2) * (g * g)
-            elif self.opt_name == "yogi":
-                self.v[k] = self.v[k] - (1 - β2) * torch.sign(self.v[k] - g * g) * (g * g)
-            m_hat = self.m[k] / (1 - β1 ** self.timestep)
-            v_hat = self.v[k] / (1 - β2 ** self.timestep)
-            new_state[k] = g_state[k] - self.lr * m_hat / (torch.sqrt(v_hat) + eps)
-        return new_state
+#     This version incorporates lessons from previous iterations, focusing on:
+#     - More stable and tunable adaptive parameters.
+#     - Refined calculation of the mixing coefficient lambda (λ).
+#     - Conservative default settings to promote convergence.
+#     - Optional, simplified staleness-aware momentum.
 
-    # def __init__(
-    #     self,
-    #     alpha_base: float = 0.2,      # base step (FedAvg used 0.1)
-    #     beta_staleness: float = 0.2,  # decay factor in exp(‑β s)
-    #     lambda_min: float = 0.05,     # minimum mixing coeff
-    #     beta1: float = 0.9,           # Adam first‑mom
-    #     beta2: float = 0.999,         # Adam second‑mom
-    #     eps: float = 1e-8,
-    #     win_success: int = 5,
-    # ):
-    #     self.alpha_base = alpha_base
-    #     self.beta_staleness = beta_staleness
-    #     self.lambda_min = lambda_min
-    #     self.beta1 = beta1
-    #     self.beta2 = beta2
-    #     self.eps = eps
+#     Contract
+#     ~~~~~~~~
+#         aggregate(global_model, client_dict, extra_info=None)
 
-    #     self.succ_hist = defaultdict(lambda: deque(maxlen=win_success))
-    #     self.timestep = 0           # Adam time‑step
-    #     self.m: OrderedDict[str, torch.Tensor] | None = None
-    #     self.v: OrderedDict[str, torch.Tensor] | None = None
+#         * `global_model`      : The live nn.Module on the aggregator (e.g., UAV).
+#         * `client_dict`       : State-dict from ONE client (e.g., sensor).
+#         * `extra_info` (dict) : Metadata from the client's message.
+#             Expected keys (all optional – robust fallbacks are used):
+#                 client_id            (str)   : Unique client identifier.
+#                 local_model_version  (int)   : Model version used for local training by the client.
+#                 global_model_version (int)   : Global model version broadcast when client started training.
+#                 staleness            (int)   : Update staleness (if pre-computed).
+#                 success_rate         (float) : Client's communication success rate .
+#                 n_samples            (int)   : Number of samples used for local training.
 
-    # # ------------------------------------------------------------------ #
-    # def aggregate(
-    #     self,
-    #     global_model: nn.Module,
-    #     client_dict: OrderedDict,
-    #     alpha=0.1,                          # kept for signature, ignored
-    #     extra_info: Dict[str, Any] | None = None,
-    # ) -> OrderedDict:
-    #     extra_info = extra_info or {}
-    #     cid           = extra_info.get("client_id", "unknown")
-    #     staleness     = int(extra_info.get("staleness", 0))
-    #     success_rate  = float(extra_info.get("success_rate", 1.0))
-    #     success_rate  = min(max(success_rate, 0.0), 1.0)
+#     Update Rule
+#     -----------
+#         w_global(t+1) = w_global(t) + λ * (w_client - w_global(t))
 
-    #     # Keep rolling success rate (fairness & noise dampening)
-    #     self.succ_hist[cid].append(success_rate)
-    #     sr_i  = sum(self.succ_hist[cid]) / len(self.succ_hist[cid])
+#         λ = effective_alpha * S(staleness) * R(success_rate) * D(n_samples) * F(first_time)
 
-    #     # -------- adaptive mixing coefficient λ ------------------------ #
-    #     λ = (
-    #         self.alpha_base
-    #         * math.exp(-self.beta_staleness * staleness)
-    #         * sr_i
-    #     )
-    #     λ = max(λ, self.lambda_min)      # floor so every update counts
+#         - effective_alpha: Overall learning rate, diminishes over training progress.
+#         - S(staleness) = exp(-effective_beta * staleness): Penalizes stale updates.
+#                          `effective_beta` increases over training progress.
+#         - R(success_rate) = max(avg_client_success_rate, min_success_rate_threshold):
+#                           Considers client's historical reliability.
+#         - D(n_samples) = (n_samples / mean_samples_across_clients)^data_size_exponent:
+#                          Weights client by data contribution, with controllable sensitivity.
+#         - F(first_time) = first_client_boost_factor if new client, else 1.0.
 
-    #     # -------- FedAdam gradient estimate ---------------------------- #
-    #     g_state = global_model.state_dict()
-    #     if self.m is None:
-    #         # initialise Adam buffers with zeros (same device/dtype)
-    #         self.m = OrderedDict((k, torch.zeros_like(p)) for k, p in g_state.items())
-    #         self.v = OrderedDict((k, torch.zeros_like(p)) for k, p in g_state.items())
+#     Key Improvements in V3:
+#     1.  Controlled Parameter Adaptation: `effective_alpha` and `effective_beta` adapt based on
+#         separate configurable maximum round counts, allowing finer control over their schedules.
+#     2.  Dampened Data Size Impact: `data_size_exponent` (0.0 to 1.0) allows tuning the
+#         influence of client data quantity, reducing risk from non-IID outliers.
+#     3.  Conservative Defaults: Initial parameters are set for stability.
+#     4.  Simplified Momentum: Optional momentum (default off) uses the V1 mechanism,
+#         benefiting from the more robust lambda calculation of V3.
+#     5.  Clearer Hyperparameters: Parameters are named for clarity and intent.
+#     """
 
-    #     new_state = OrderedDict()
-    #     self.timestep += 1
-    #     for k, w_t in g_state.items():
-    #         delta = client_dict[k].to(w_t.device) - w_t          # “gradient”
-    #         # scale by λ
-    #         g = λ * delta
+#     def __init__(
+#         self,
+#         # Alpha (Overall Learning Rate) parameters
+#         initial_alpha: float = 0.75,
+#         final_alpha: float = 0.1,
+#         max_rounds_for_alpha_decay: int = 100,
 
-    #         # Adam moments
-    #         self.m[k] = self.beta1 * self.m[k] + (1 - self.beta1) * g
-    #         self.v[k] = self.beta2 * self.v[k] + (1 - self.beta2) * (g * g)
+#         # Beta (Staleness Penalty) parameters
+#         initial_beta: float = 0.05,
+#         final_beta: float = 0.5,
+#         max_rounds_for_beta_increase: int = 100,
 
-    #         # bias‑corrected
-    #         m_hat = self.m[k] / (1 - self.beta1 ** self.timestep)
-    #         v_hat = self.v[k] / (1 - self.beta2 ** self.timestep)
+#         # Reliability Factor parameters
+#         min_success_rate_threshold: float = 0.3,
+#         success_history_window: int = 10, # Window for averaging client success rate
 
-    #         # parameter update
-    #         new_state[k] = w_t + m_hat / (torch.sqrt(v_hat) + self.eps)
+#         # Data Size Factor parameters
+#         data_size_exponent: float = 0.5, # Range ; 0 means D=1, 1 means linear scaling
+#         sample_history_window: int = 20, # Window for moving average of sample counts
 
-    #     return new_state
+#         # First-Time Client Boost
+#         first_client_boost_factor: float = 1.5,
 
+#         # Momentum parameters
+#         use_momentum: bool = False,
+#         momentum_coeff: float = 0.9
+#     ):
+#         self.initial_alpha = initial_alpha
+#         self.final_alpha = final_alpha
+#         self.max_rounds_for_alpha_decay = max_rounds_for_alpha_decay
+
+#         self.initial_beta = initial_beta
+#         self.final_beta = final_beta
+#         self.max_rounds_for_beta_increase = max_rounds_for_beta_increase
+
+#         self.min_success_rate_threshold = min_success_rate_threshold
+#         self.first_client_boost_factor = first_client_boost_factor
+
+#         if not (0.0 <= data_size_exponent <= 1.0):
+#             raise ValueError("data_size_exponent must be between 0.0 and 1.0")
+#         self.data_size_exponent = data_size_exponent
+
+#         # History tracking
+#         self.client_success_history = defaultdict(lambda: deque(maxlen=success_history_window))
+#         self.global_sample_history = deque(maxlen=sample_history_window)
+#         self.seen_clients = set()
+
+#         # State
+#         self.current_round = 0
+#         self.velocity = None # For momentum
+
+#         # Momentum settings
+#         self.use_momentum = use_momentum
+#         self.momentum_coeff = momentum_coeff
+        
+#         logger.info(f"Initialized AdaptiveAsyncV3 Strategy with parameters:")
+#         logger.info(f"  Alpha: initial={initial_alpha}, final={final_alpha}, decay_rounds={max_rounds_for_alpha_decay}")
+#         logger.info(f"  Beta: initial={initial_beta}, final={final_beta}, increase_rounds={max_rounds_for_beta_increase}")
+#         logger.info(f"  Reliability: min_threshold={min_success_rate_threshold}, history_window={success_history_window}")
+#         logger.info(f"  Data Size: exponent={data_size_exponent}, history_window={sample_history_window}")
+#         logger.info(f"  First Client Boost: {first_client_boost_factor}")
+#         logger.info(f"  Momentum: use={use_momentum}, coeff={momentum_coeff}")
+
+#     def aggregate(
+#         self,
+#         global_model: torch.nn.Module,
+#         client_model_state_dict: OrderedDict,
+#         extra_info: Dict[str, Any] | None = None,
+#     ) -> OrderedDict:
+#         """
+#         Aggregates a client's model update with the global model using the AdaptiveAsyncV3 strategy.
+#         """
+#         self.current_round += 1
+#         extra_info = extra_info if extra_info is not None else {}
+
+#         # --- 1. Calculate Training Progress for Adaptive Parameters ---
+#         alpha_progress = min(self.current_round / self.max_rounds_for_alpha_decay, 1.0)
+#         effective_alpha = self.initial_alpha - (self.initial_alpha - self.final_alpha) * alpha_progress
+
+#         beta_progress = min(self.current_round / self.max_rounds_for_beta_increase, 1.0)
+#         effective_beta = self.initial_beta + (self.final_beta - self.initial_beta) * beta_progress
+
+#         # --- 2. Extract Metadata with Robust Defaults ---
+#         client_id = extra_info.get("client_id", f"unknown_client_{self.current_round}")
+        
+#         # Staleness: Prefer pre-computed, else derive if versions are available
+#         staleness = int(extra_info.get("staleness", 0))
+#         if staleness == 0: # Attempt to derive if not provided or zero
+#             g_version = extra_info.get("global_model_version")
+#             l_version = extra_info.get("local_model_version")
+#             if g_version is not None and l_version is not None:
+#                 staleness = max(0, int(g_version) - int(l_version))
+        
+#         # Success Rate: Use provided, default to 1.0 (perfect reliability)
+#         current_success_rate = float(extra_info.get("success_rate", 1.0))
+#         current_success_rate = min(max(current_success_rate, 0.0), 1.0) # Clip to 
+
+#         # Number of Samples: Use provided, default to 1 (to avoid division by zero)
+#         n_samples = int(extra_info.get("n_samples", 1))
+#         n_samples = max(1, n_samples) # Ensure at least 1 sample
+
+#         # --- 3. Update and Use Rolling Histories ---
+#         self.client_success_history[client_id].append(current_success_rate)
+#         avg_client_success_rate = sum(self.client_success_history[client_id]) / len(self.client_success_history[client_id])
+
+#         self.global_sample_history.append(n_samples)
+#         mean_global_samples = sum(self.global_sample_history) / len(self.global_sample_history) if self.global_sample_history else float(n_samples)
+#         mean_global_samples = max(1.0, mean_global_samples) # Avoid division by zero
+
+#         # First-time client factor
+#         is_first_time_client = client_id not in self.seen_clients
+#         if is_first_time_client:
+#             self.seen_clients.add(client_id)
+#         first_time_factor = self.first_client_boost_factor if is_first_time_client else 1.0
+
+#         # --- 4. Compute Adaptive Mixing Coefficient (λ) Components ---
+#         # S(staleness): Staleness penalty factor
+#         S = math.exp(-effective_beta * staleness)
+
+#         # R(success_rate): Reliability factor
+#         R = max(avg_client_success_rate, self.min_success_rate_threshold)
+        
+#         # D(n_samples): Data size factor (with exponent for sensitivity control)
+#         if self.data_size_exponent == 0:
+#             D = 1.0
+#         else:
+#             D = (n_samples / mean_global_samples) ** self.data_size_exponent
+#             D = max(0.1, min(D, 3.0)) # Clip D to prevent extreme values (e.g. 0.1x to 3x)
+
+#         # F(first_time): First-time client boost factor
+#         F = first_time_factor
+        
+#         # Combine all factors for lambda
+#         lam = effective_alpha * S * R * D * F
+#         lam = max(0.0, min(lam, 1.0))  # Ensure lambda is within 
+
+#         # --- 5. Logging ---
+#         log_message = (
+#             f"Round {self.current_round}, Client {client_id} (FirstTime={is_first_time_client}):\n"
+#             f"  Staleness={staleness}, SuccessRate(current)={current_success_rate:.2f}, N_Samples={n_samples}\n"
+#             f"  EffectiveAlpha={effective_alpha:.3f} (progress={alpha_progress:.2f}), EffectiveBeta={effective_beta:.3f} (progress={beta_progress:.2f})\n"
+#             f"  Factors: S={S:.3f}, R={R:.3f} (avg_client_sr={avg_client_success_rate:.2f}), D={D:.3f} (mean_global_samples={mean_global_samples:.1f}), F={F:.1f}\n"
+#             f"  Lambda(λ) = {lam:.4f}"
+#         )
+#         logger.info(log_message)
+
+#         # --- 6. Global Model Update ---
+#         new_global_state_dict = OrderedDict()
+#         current_global_state_dict = global_model.state_dict()
+
+#         if self.use_momentum:
+#             if self.velocity is None: # Initialize velocity buffer
+#                 self.velocity = OrderedDict()
+#                 for k, v_global in current_global_state_dict.items():
+#                     self.velocity[k] = torch.zeros_like(v_global, device=v_global.device)
+        
+#         for key, global_param_tensor in current_global_state_dict.items():
+#             if key in client_model_state_dict:
+#                 client_param_tensor = client_model_state_dict[key].to(global_param_tensor.device)
+#                 diff = client_param_tensor - global_param_tensor
+
+#                 if self.use_momentum and self.velocity is not None:
+#                     update_for_momentum = lam * diff # Lambda already includes staleness factor S
+#                     self.velocity[key] = self.momentum_coeff * self.velocity[key] + update_for_momentum
+#                     new_global_state_dict[key] = global_param_tensor + self.velocity[key]
+#                 else:
+#                     new_global_state_dict[key] = global_param_tensor + lam * diff
+#             else:
+#                 # If parameter doesn't exist in client model, keep global parameter
+#                 new_global_state_dict[key] = global_param_tensor
+        
+#         if lam < 1e-6 and self.current_round > 10 : # Log if learning rate becomes too small after initial rounds
+#              logger.warning(f"Lambda is very small ({lam:.2e}) for client {client_id} at round {self.current_round}. Learning might be stalled for this update.")
+
+#         return new_global_state_dict
 
 class FedAdaptiveRL(AggregationStrategy):
     """

@@ -25,6 +25,7 @@ from tqdm import tqdm
 import sys
 import time
 import subprocess
+import warnings
 
 from dataset_loader import DatasetLoader
 from model_manager import ModelManager
@@ -32,6 +33,10 @@ from image_classifier_autoencoders import  Autoencoder
 from federated_learning_trainer import FederatedLearningTrainer
 from federated_learning_aggregator import FederatedLearningAggregator
 from aggregation_strategy import AdaptiveAsyncStrategyV2, AdaptiveAsyncStrategy, FedAdaptiveRL, QFedAvgStrategy, FedAdamStrategy,FedAvgStrategy, AsyncFedAvgStrategy, RELAYStrategy, SAFAStrategy, AstraeaStrategy, TimeWeightedStrategy, FedProxStrategy
+
+# Suppress specific numpy/scikit-learn warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='sklearn.utils.extmath')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='numpy.core._multiarray_umath')
 
 def custom_format(record):
     """
@@ -289,7 +294,7 @@ def main():
         "FedAdamStrategy": FedAdamStrategy(),
         "QFedAvgStrategy": QFedAvgStrategy(),
         "FedAdaptiveRL": FedAdaptiveRL(),
-        "AdaptiveAsyncStrategyV2": AdaptiveAsyncStrategyV2(),
+        "AdaptiveAsyncStrategyV2": AdaptiveAsyncStrategyV2(batch_size=args.num_sensors),
         "AdaptiveAsyncStrategy": AdaptiveAsyncStrategy()
     } 
 
@@ -426,17 +431,17 @@ def main():
             logger.info("Converged. Simulation finished.")
             break
   
-        current_time = simulation._current_timestamp
-        for leader_id in leader_ids:
-            leader_position = simulation.get_node(leader_id).position
-            positions.append({
-                "role": "UAV",
-                "agent": leader_id,
-                "timestamp": current_time,
-                "x": leader_position[0],
-                "y": leader_position[1],
-                "z": leader_position[2],
-            })
+        # current_time = simulation._current_timestamp
+        # for leader_id in leader_ids:
+        #     leader_position = simulation.get_node(leader_id).position
+        #     positions.append({
+        #         "role": "UAV",
+        #         "agent": leader_id,
+        #         "timestamp": current_time,
+        #         "x": leader_position[0],
+        #         "y": leader_position[1],
+        #         "z": leader_position[2],
+        #     })
 
     # plot_path(positions, sensor_positions_log, output_dir)
     logger.info("Path plotted.")

@@ -12,9 +12,16 @@ OUTPUT_DIR="./output"
 SIMULATION_PARAMS="$@"
 
 # Export environment variables to limit CPU usage across threads
-export OMP_NUM_THREADS=$OMP_NUM_THREADS
-export MKL_NUM_THREADS=$MKL_NUM_THREADS
-export PYTORCH_NUM_THREADS=$PYTORCH_NUM_THREADS
+JOBS=1                       # change if you fire more than one python at once
+CORES=$(sysctl -n hw.physicalcpu)      # 14 on M4 Pro
+THREADS=$(( CORES / JOBS ))            # <- auto-compute
+
+export OMP_NUM_THREADS=$THREADS        # OpenMP / BLAS
+export MKL_NUM_THREADS=$THREADS        # MKL (if NumPy uses it)
+export PYTORCH_NUM_THREADS=$THREADS    # PyTorch intra-op
+export OMP_PROC_BIND=close             # keep sibling threads together
+export OMP_PLACES=cores                # 1 thread = 1 core
+echo "→ using $THREADS threads per job on $CORES cores"
 
 # Function to handle cleanup on exit
 cleanup() {

@@ -13,14 +13,15 @@ DEFAULT_SUCCESS_RATES=("1.0")
 # Strategies to run
 STRATEGIES=(
   # "FedAdamStrategy"
-  "AdaptiveAsyncStrategy"
+  # "AdaptiveAsyncStrategy"
   # "FedAdaptiveRL"
-  "FedAvgStrategy"
-  "AsyncFedAvgStrategy"
-   "FedProxStrategy"
+  # "FedAvgStrategy"
+  # "AsyncFedAvgStrategy"
+  #  "FedProxStrategy"
   # "RELAYStrategy"
   # "SAFAStrategy"
   # "AstraeaStrategy"
+  AdaptiveAsyncStrategyV2
 )
 
 # Output log file

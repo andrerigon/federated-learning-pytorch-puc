@@ -18,190 +18,135 @@ import json
 
 # Configure loguru
 
+import os, re, glob, json, sys
+from collections import defaultdict
+from typing import List, Tuple, Dict
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import matplotlib
+import tensorflow as tf
+from tensorflow.python.summary.summary_iterator import summary_iterator
+from loguru import logger
+
+# ─────────────────────────────────────────────────────────────────────────────
 class TensorBoardAnalyzer:
-    def __init__(self, base_dir: str = '.'):
-        self.base_dir = base_dir
-        self.scenarios = self._get_scenarios()
-
-        # Estrutura de dados para armazenar séries de métricas
-        # self.metrics_data[scenario][strategy][tag] = lista de (wall_time, value)
+    # --------------------------------------------------------------------- init
+    def __init__(self, base_dir: str = "./runs"):
+        self.base_dir   = base_dir
+        self.scenarios  = self._get_scenarios()
         self.metrics_data = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
-
-        # Estrutura para armazenar hparams finais
-        # self.hparams_data[scenario][strategy] = dict com { 'hparam/final_accuracy': valor, ... }
         self.hparams_data = defaultdict(lambda: defaultdict(dict))
-
         logger.info(f"Found scenarios: {self.scenarios}")
 
+    # ---------------------------------------------------------------- helpers
     def _get_scenarios(self) -> List[str]:
         return [
-            f"{self.base_dir}/{d}"
+            os.path.join(self.base_dir, d)
             for d in os.listdir(self.base_dir)
-            if d.startswith('runs_')
+            if d.startswith("runs_") and os.path.isdir(os.path.join(self.base_dir, d))
         ]
 
-    def _extract_scenario_params(self, scenario: str) -> Tuple[int, int, float]:
-        """
-        Extrai grid_size, sensor_count e success_rate do nome do diretório,
-        ex.: runs_500x500_s10_sr0.9 => (500, 10, 0.9).
-        Se não encontrar, retorna (0,0,0).
-        """
-        grid_match = re.search(r'(\d+)x\d+', scenario)
-        sensor_match = re.search(r'_s(\d+)_', scenario)
-        sr_match = re.search(r'sr(\d+\.\d+)', scenario)
-        
-        grid_size = int(grid_match.group(1)) if grid_match else 0
-        sensor_count = int(sensor_match.group(1)) if sensor_match else 0
-        success_rate = float(sr_match.group(1)) if sr_match else 0
-        
-        return grid_size, sensor_count, success_rate
+    @staticmethod
+    def _extract_scenario_params(scenario: str) -> Tuple[int, int, float]:
+        name = os.path.basename(scenario)
+        g  = re.search(r"(\d+)x\d+",   name)
+        sc = re.search(r"_s(\d+)_",    name)
+        sr = re.search(r"sr([\d\.]+)", name)
+        return (
+            int(g.group(1))   if g  else 0,
+            int(sc.group(1))  if sc else 0,
+            float(sr.group(1)) if sr else 0.0
+        )
 
-    def _parse_event_file(self, event_file: str) -> Dict:
+    # ------------------------------------------------------------- process logs
+    def process_logs(self) -> bool:
         """
-        Lê um arquivo de eventos do TensorBoard e retorna um dicionário
-        com as séries de métricas e também os hparams (se existirem).
-          {
-            <tag1>: [(time1, value1), (time2, value2), ...],
-            ...
-            "hparams": {
-                'hparam/final_accuracy': <valor>,
-                'hparam/convergence_time': <valor>,
-                ...
-            }
-          }
+        Parse every `aggregator_metrics` directory found inside each scenario,
+        independent of whether the layout is:
+            runs_*/aggregator_metrics/<strategy>/run_*/final_metrics.json
+        or:
+            runs_*/<strategy>/run_*/aggregator_metrics/<strategy>/run_*/…
         """
-        metrics = defaultdict(list)
-        metrics["hparams"] = {}
-
-        try:
-            for event in summary_iterator(event_file):
-                for value in event.summary.value:
-                    if hasattr(value, 'simple_value'):
-                        # Se for um hparam (tag começa com "hparam/"), salvamos num dict separado
-                        if value.tag.startswith('hparam/'):
-                            metrics["hparams"][value.tag] = value.simple_value
-                        else:
-                            # Caso contrário, armazenamos na lista da métrica
-                            metrics[value.tag].append((event.wall_time, value.simple_value))
-        except Exception as e:
-            print(f"Error reading {event_file}: {e}")
-
-        return metrics
-
-    def process_logs(self):
-        """
-        Process all runs by directly reading from the aggregator_metrics directories.
-        Aggregates runs for each strategy and scenario.
-        """
-        logger.info("Starting to process logs...")
-        logger.info(f"Base directory: {self.base_dir}")
-        logger.info(f"Found {len(self.scenarios)} scenarios to analyze")
-        
+        logger.info("=== Processing logs ===")
         for scenario in self.scenarios:
-            scenario_name = os.path.basename(scenario)
-            logger.info(f"Processing scenario: {scenario_name}")
-            
-            # Extract parameters from scenario name
-            grid_size, sensor_count, success_rate = self._extract_scenario_params(scenario)
-            logger.info(f"  Parameters: Grid={grid_size}x{grid_size}, Sensors={sensor_count}, Success Rate={success_rate}")
-            
-            # Path to aggregator_metrics directory
-            metrics_dir = os.path.join(scenario, 'aggregator_metrics')
-            
-            if not os.path.exists(metrics_dir):
-                logger.warning(f"No aggregator_metrics directory found at {metrics_dir}")
+            scen_name = os.path.basename(scenario)
+            grid, sensors, sr = self._extract_scenario_params(scenario)
+            logger.info(f"Scenario {scen_name}  (grid={grid}, sensors={sensors}, sr={sr})")
+
+            # ── collect every aggregator_metrics dir (flat + nested)
+            candidate_dirs = {                         # use set to avoid dups
+                os.path.join(scenario, "aggregator_metrics"),
+                *glob.glob(os.path.join(scenario, "*/aggregator_metrics")),
+                *glob.glob(os.path.join(scenario, "*/*/aggregator_metrics")),
+            }
+            metrics_dirs = [d for d in candidate_dirs if os.path.isdir(d)]
+
+            if not metrics_dirs:
+                logger.warning(f"  ⚠ no aggregator_metrics found in {scenario}")
                 continue
-            
-            # Get all strategy directories
-            strategy_dirs = [d for d in os.listdir(metrics_dir) 
-                            if os.path.isdir(os.path.join(metrics_dir, d))]
-            
-            logger.info(f"  Found {len(strategy_dirs)} strategies: {', '.join(strategy_dirs)}")
-            
-            for strategy in strategy_dirs:
-                strategy_dir = os.path.join(metrics_dir, strategy)
-                
-                # Get all run directories
-                run_dirs = [d for d in os.listdir(strategy_dir) 
-                           if os.path.isdir(os.path.join(strategy_dir, d)) and d.startswith('run_')]
-                
-                logger.info(f"  Strategy {strategy}: found {len(run_dirs)} runs")
-                
-                # Collect metrics from all runs for this strategy
-                all_run_metrics = []
-                
-                # Temporary storage for metrics across all runs
-                all_accuracies = []
-                all_losses = []
-                all_staleness = []
-                
-                for run_dir_name in run_dirs:
-                    run_dir = os.path.join(strategy_dir, run_dir_name)
-                    metrics_file = os.path.join(run_dir, 'final_metrics.json')
-                    
-                    if os.path.exists(metrics_file):
+
+            for mdir in metrics_dirs:
+                strategy_dirs = [
+                    d for d in os.listdir(mdir)
+                    if os.path.isdir(os.path.join(mdir, d))
+                ]
+                logger.info(f"  ↳ {os.path.relpath(mdir, scenario)} : {len(strategy_dirs)} strategies")
+
+                for strat in strategy_dirs:
+                    strat_dir = os.path.join(mdir, strat)
+                    run_dirs = [
+                        d for d in os.listdir(strat_dir)
+                        if os.path.isdir(os.path.join(strat_dir, d)) and d.startswith("run_")
+                    ]
+
+                    # temporary collectors per strategy
+                    run_metrics = []
+
+                    for run in run_dirs:
+                        fjson = os.path.join(strat_dir, run, "final_metrics.json")
+                        if not os.path.isfile(fjson):
+                            logger.debug(f"     · missing {fjson}")
+                            continue
                         try:
-                            with open(metrics_file, 'r') as f:
-                                metrics_json = json.load(f)
-                                
-                                # Extract metrics from the JSON structure
-                                run_metrics = {
-                                    'final_accuracy': metrics_json.get('performance', {}).get('final_accuracy'),
-                                    'convergence_time': metrics_json.get('convergence_time'),
-                                    'total_updates': metrics_json.get('total_updates'),
-                                    'communication_overhead': metrics_json.get('communication', {}).get('total_messages', 0),
-                                    'avg_staleness': metrics_json.get('staleness', {}).get('average', 0)
-                                }
-                                
-                                # Check if we have the required metrics
-                                if run_metrics['final_accuracy'] is not None:
-                                    # Add to all run metrics
-                                    all_run_metrics.append(run_metrics)
-                                    
-                                    # Collect metrics for aggregation
-                                    all_accuracies.append((0, run_metrics['final_accuracy']))
-                                    if 'performance' in metrics_json and 'final_loss' in metrics_json['performance']:
-                                        all_losses.append((0, metrics_json['performance']['final_loss']))
-                                    if run_metrics['avg_staleness'] is not None:
-                                        all_staleness.append((0, run_metrics['avg_staleness']))
-                                    
-                                    logger.debug(f"Collected metrics from {run_dir}: accuracy={run_metrics['final_accuracy']}")
-                                else:
-                                    logger.warning(f"Missing required metrics in {metrics_file}")
+                            with open(fjson) as f:
+                                js = json.load(f)
+                            run_metrics.append({
+                                "final_accuracy":        js.get("performance", {}).get("final_accuracy"),
+                                "convergence_time":      js.get("convergence_time"),
+                                "total_updates":         js.get("total_updates"),
+                                "communication_overhead":js.get("communication", {}).get("total_messages", 0),
+                                "avg_staleness":         js.get("staleness", {}).get("average", 0),
+                            })
                         except Exception as e:
-                            logger.error(f"Error processing {metrics_file}: {e}")
-                            import traceback
-                            logger.error(traceback.format_exc())
-                
-                # Now aggregate and store metrics for this strategy
-                if all_run_metrics:
-                    # Calculate aggregated metrics
-                    agg_metrics = {
-                        'final_accuracy': np.mean([m['final_accuracy'] for m in all_run_metrics if m['final_accuracy'] is not None]),
-                        'convergence_time': np.mean([m['convergence_time'] for m in all_run_metrics if m['convergence_time'] is not None]),
-                        'total_updates': np.mean([m['total_updates'] for m in all_run_metrics if m['total_updates'] is not None]),
-                        'communication_overhead': np.mean([m['communication_overhead'] for m in all_run_metrics if m['communication_overhead'] is not None]),
-                        'avg_staleness': np.mean([m['avg_staleness'] for m in all_run_metrics if m['avg_staleness'] is not None])
-                    }
-                    
-                    # Store aggregated metrics in the metrics_data structure
-                    self.metrics_data[scenario][strategy]['Evaluation/accuracy'] = all_accuracies
-                    self.metrics_data[scenario][strategy]['Evaluation/loss'] = all_losses
-                    self.metrics_data[scenario][strategy]['Staleness/Value'] = all_staleness
-                    
-                    # Store aggregated metrics in the hparams_data structure
-                    self.hparams_data[scenario][strategy]['hparam/final_accuracy'] = agg_metrics['final_accuracy']
-                    self.hparams_data[scenario][strategy]['hparam/convergence_time'] = agg_metrics['convergence_time']
-                    self.hparams_data[scenario][strategy]['hparam/total_updates'] = agg_metrics['total_updates']
-                    self.hparams_data[scenario][strategy]['hparam/avg_staleness'] = agg_metrics['avg_staleness']
-                    self.hparams_data[scenario][strategy]['hparam/communication_overhead'] = agg_metrics['communication_overhead']
-                    
-                    logger.info(f"  Strategy {strategy}: aggregated metrics from {len(all_run_metrics)} runs")
-                    logger.info(f"  Strategy {strategy}: mean accuracy={agg_metrics['final_accuracy']:.2f}, " +
-                               f"mean convergence time={agg_metrics['convergence_time']:.2f}")
-                else:
-                    logger.warning(f"  Strategy {strategy}: no valid metrics found")
-        
+                            logger.error(f"     · error reading {fjson}: {e}")
+
+                    if not run_metrics:
+                        logger.warning(f"    Strategy {strat}: no valid runs")
+                        continue
+
+                    # aggregate means
+                    agg = pd.DataFrame(run_metrics).mean(numeric_only=True).to_dict()
+
+                    # store time-series placeholders (wall-time=0 → just use scalar)
+                    self.metrics_data[scenario][strat]["Evaluation/accuracy"] = [(0, agg["final_accuracy"])]
+                    self.metrics_data[scenario][strat]["Staleness/Value"]     = [(0, agg["avg_staleness"])]
+
+                    # store hparams-style scalars
+                    self.hparams_data[scenario][strat]["hparam/final_accuracy"]        = agg["final_accuracy"]
+                    self.hparams_data[scenario][strat]["hparam/convergence_time"]      = agg["convergence_time"]
+                    self.hparams_data[scenario][strat]["hparam/total_updates"]         = agg["total_updates"]
+                    self.hparams_data[scenario][strat]["hparam/communication_overhead"]= agg["communication_overhead"]
+                    self.hparams_data[scenario][strat]["hparam/avg_staleness"]         = agg["avg_staleness"]
+
+                    logger.info(
+                        f"    Strategy {strat}: μ acc={agg['final_accuracy']:.2f}  "
+                        f"μ time={agg['convergence_time']:.1f}s  "
+                        f"runs={len(run_metrics)}"
+                    )
+
         return True
 
     def calculate_strategy_ranking(self, results_df: pd.DataFrame) -> pd.DataFrame:
