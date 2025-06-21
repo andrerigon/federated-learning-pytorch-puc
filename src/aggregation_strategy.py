@@ -397,7 +397,7 @@ class AdaptiveAsyncStrategyV2:
         
         # Batching state
         self.network_quality_history = deque(maxlen=network_quality_window)
-        self.pending_updates = []  # List of (client_dict, extra_info, lambda) tuples
+        self.pending_updates = {}  # Dict[client_id, (client_dict, extra_info, lambda, factors)]
         self.batch_start_time = None
         self.is_good_network = False
         
@@ -450,7 +450,7 @@ class AdaptiveAsyncStrategyV2:
         
         # Check batch size
         if len(self.pending_updates) >= self.batch_size:
-            logger.info(f"Processing batch: size limit reached ({len(self.pending_updates)} updates)")
+            logger.info(f"Processing batch: size limit reached ({len(self.pending_updates)} unique clients)")
             return True
         
         # Check timeout
@@ -544,7 +544,7 @@ class AdaptiveAsyncStrategyV2:
         if not self.pending_updates:
             return global_model.state_dict()
         
-        logger.info(f"Processing batch of {len(self.pending_updates)} updates")
+        logger.info(f"Processing batch of {len(self.pending_updates)} unique client updates")
         
         # Get current global state
         g_state = global_model.state_dict()
@@ -558,7 +558,7 @@ class AdaptiveAsyncStrategyV2:
             accumulated_update[k] = torch.zeros_like(v, dtype=torch.float32)
         
         # Process each pending update
-        for client_dict, _, lam, factors in self.pending_updates:
+        for client_dict, _, lam, factors in self.pending_updates.values():
             # Log this client's contribution
             logger.info(f"Batch member - Client {factors['client_id']}: λ={lam:.4f}")
             
@@ -673,14 +673,15 @@ class AdaptiveAsyncStrategyV2:
             if self.batch_start_time is None:
                 self.batch_start_time = time.time()
             
-            self.pending_updates.append((client_dict, extra_info, lam, factors))
+            cid = factors["client_id"]
+            self.pending_updates[cid] = (client_dict, extra_info, lam, factors)
             
             # Check if we should process the batch
             if self.should_process_batch():
                 return self.process_batch(global_model)
             else:
                 # Return current state without changes (accumulating)
-                logger.info(f"Update accumulated ({len(self.pending_updates)}/{self.batch_size})")
+                logger.info(f"Update accumulated ({len(self.pending_updates)}/{self.batch_size}) [unique clients]")
                 return global_model.state_dict()
         else:
             # Poor network or batching disabled: process immediately
